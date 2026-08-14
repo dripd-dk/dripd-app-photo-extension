@@ -25,6 +25,10 @@ npm install && npm run build:dev
 
 Then, in Chrome:
 
+0. **Remove the dev stub first** (`dripd capture (dev stub)`, from
+   `dripd-app/scripts/dev-capture-stub/`). It matches `localhost:3000` too, so with
+   both loaded two extensions answer every request and you will be debugging the
+   wrong one.
 1. `chrome://extensions` → **Developer mode** on → **Load unpacked** →
    pick the **`dist-dev/`** folder (not `dist/` — the dev build is the one that
    matches `localhost:3000`).
@@ -135,13 +139,20 @@ driving it, so treat it as code, not configuration:
 - The background never fetches a URL that did not arrive through the bridge, and
   never anything that is not `https:`.
 
+One consequence worth knowing: MV3 idle-terminates a background service worker
+after roughly 30 seconds, which would drop the session map and its TTL timer
+mid-pick and orphan the popup. While any session is alive the worker therefore makes
+one throwaway API call every 20 seconds to reset that idle timer, and stops the
+moment the last session ends. The alternative — persisting sessions — would mean
+adding a `storage` permission for state that is worthless after a restart.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-67 tests, ~2.5 s, no browser. `npm test` builds first so the bundle test cannot
+68 tests, ~2.5 s, no browser. `npm test` builds first so the bundle test cannot
 run against a stale `dist/`.
 
 - `collect` / `consent` / `key` / `gallery` — pure functions over a happy-dom DOM.

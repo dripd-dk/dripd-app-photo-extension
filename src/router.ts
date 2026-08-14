@@ -52,6 +52,8 @@ const POPUP_HEIGHT = 960
 /** Matches the cap on `POST /api/studio/cutout`: bigger cannot be used anyway,
  *  and base64 of a 50 MB file would just be a slower way to fail. */
 const MAX_BYTES = 20 * 1024 * 1024
+/** Comfortably inside Chromium's ~30 s idle-termination window. */
+const KEEPALIVE_MS = 20_000
 
 export interface TabInfo {
   id?: number
@@ -65,7 +67,11 @@ export interface WindowInfo {
 
 /** Only the slice of the extension API this file uses, so tests can fake it. */
 export interface BrowserLike {
-  runtime: { getURL(path: string): string }
+  runtime: {
+    getURL(path: string): string
+    /** Only ever called to keep the worker alive; the answer is discarded. */
+    getPlatformInfo?(): Promise<unknown>
+  }
   permissions: { contains(p: { origins: string[] }): Promise<boolean> }
   windows: {
     create(opts: Record<string, unknown>): Promise<WindowInfo>
@@ -97,6 +103,9 @@ export interface RouterDeps {
   newId?: () => string
   schedule?: (fn: () => void, ms: number) => unknown
   cancel?: (handle: unknown) => void
+  /** Hold the background context open while any session is alive. See
+   *  `defaultKeepAlive` for why this exists at all. */
+  keepAlive?: (active: boolean) => void
   log?: (...args: unknown[]) => void
 }
 
@@ -141,6 +150,32 @@ function showRetryBanner(): void {
   document.documentElement.appendChild(el)
 }
 
+/**
+ * Keep the background context alive while a capture is in flight.
+ *
+ * MV3 terminates an idle service worker after roughly 30 seconds, which would take
+ * the session map and its TTL timer with it — the user picks an image half a minute
+ * after the harvest, gets `no_session`, and the popup we opened is left orphaned
+ * with nothing alive to dismiss it. Persisting sessions instead would mean adding
+ * the `storage` permission for state that is meaningless once the worker restarts.
+ *
+ * Any extension API call resets the idle timer, so one throwaway call every 20 s is
+ * enough. It runs only while a session exists, so it can never outlive a capture.
+ */
+function defaultKeepAlive(api: BrowserLike): (active: boolean) => void {
+  let handle: ReturnType<typeof setInterval> | null = null
+  return (active) => {
+    if (active && handle === null) {
+      handle = setInterval(() => {
+        void api.runtime.getPlatformInfo?.().catch(() => {})
+      }, KEEPALIVE_MS)
+    } else if (!active && handle !== null) {
+      clearInterval(handle)
+      handle = null
+    }
+  }
+}
+
 function looksLikeHarvest(value: unknown): value is RawHarvest {
   return (
     !!value &&
@@ -169,8 +204,14 @@ export function createRouter(deps: RouterDeps): Router {
   const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const cancel = deps.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>))
   const log = deps.log ?? (() => {})
+  const keepAlive = deps.keepAlive ?? defaultKeepAlive(api)
 
   const sessions = new Map<string, Session>()
+
+  /** Called after every change to `sessions`, never on its own. */
+  function syncKeepAlive(): void {
+    keepAlive(sessions.size > 0)
+  }
 
   const wait = (ms: number) =>
     new Promise<void>((resolve) => {
@@ -195,6 +236,7 @@ export function createRouter(deps: RouterDeps): Router {
     session.timer = schedule(() => {
       log('session expired', session.id)
       sessions.delete(session.id)
+      syncKeepAlive()
       void closeWindow(session)
     }, ttlMs)
   }
@@ -323,6 +365,7 @@ export function createRouter(deps: RouterDeps): Router {
       // Registered only once we have something; a failed harvest leaves no
       // session behind to expire.
       sessions.set(session.id, session)
+      syncKeepAlive()
       arm(session)
 
       const meta = (result as RawHarvest & { meta?: unknown }).meta

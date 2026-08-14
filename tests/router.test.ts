@@ -125,6 +125,9 @@ function fakeFetch(body: Uint8Array, init: { ok?: boolean; status?: number; type
 function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
   const timers = fakeTimers()
   const { api, log } = fakeApi(opts)
+  // Kept off the timer seam on purpose: a 20 s heartbeat sharing `schedule` would
+  // show up in every TTL assertion in this file.
+  const keepAlive: boolean[] = []
   let n = 0
   const router = createRouter({
     api,
@@ -136,8 +139,9 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
     newId: () => `s${++n}`,
     schedule: timers.schedule,
     cancel: timers.cancel,
+    keepAlive: (active) => keepAlive.push(active),
   })
-  return { router, log, timers }
+  return { router, log, timers, keepAlive }
 }
 
 /** Harvest once and hand back the session id. Every session test starts here. */
@@ -382,6 +386,19 @@ describe('session TTL', () => {
 
     expect(after).toHaveLength(1)
     expect(after).not.toEqual(before) // the old deadline was cancelled
+  })
+
+  it('holds the worker open for exactly as long as a session lives', async () => {
+    // Without this, MV3 idle-terminates the worker after ~30 s and the user's pick
+    // lands on a session — and a TTL timer — that no longer exists.
+    const { router, timers, keepAlive } = build()
+    await startSession(router)
+    expect(keepAlive).toEqual([true])
+
+    timers.fireAll()
+    await Promise.resolve()
+
+    expect(keepAlive.at(-1)).toBe(false)
   })
 
   it('does not try to close a window that resolve already closed', async () => {
