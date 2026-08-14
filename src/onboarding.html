@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="da">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dripd</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #111111;
+        --muted: #5b5b5b;
+        --line: #e4e4e4;
+        --accent: #111111;
+        --accent-fg: #ffffff;
+        --ok: #0f7b4f;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #101010;
+          --fg: #f4f4f4;
+          --muted: #a6a6a6;
+          --line: #2a2a2a;
+          --accent: #f4f4f4;
+          --accent-fg: #101010;
+          --ok: #4ec98b;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        display: flex;
+        justify-content: center;
+        padding: 48px 20px;
+      }
+      main { width: 100%; max-width: 34rem; }
+      h1 { font-size: 1.5rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; }
+      p.lead { color: var(--muted); margin: 0 0 2rem; }
+      ul { padding-left: 1.1rem; margin: 0 0 2rem; }
+      li { margin-bottom: 0.5rem; }
+      li b { font-weight: 600; }
+      button {
+        font: inherit;
+        font-weight: 600;
+        padding: 0.8rem 1.4rem;
+        border: 0;
+        border-radius: 10px;
+        background: var(--accent);
+        color: var(--accent-fg);
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .status { margin-top: 1.25rem; font-weight: 600; min-height: 1.6rem; }
+      .status[data-state="granted"] { color: var(--ok); }
+      footer {
+        margin-top: 2.5rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Giv dripd adgang til at hente billeder</h1>
+      <p class="lead">
+        Det sker én gang. Din browser vil spørge, om dripd må læse sider på websteder —
+        her er præcis hvad det bruges til.
+      </p>
+
+      <ul>
+        <li>
+          Når du selv indsætter et link i dripd-studiet, åbner vi butikkens side kort i et
+          lille vindue og læser <b>billed-adresserne</b> derfra.
+        </li>
+        <li>
+          Billedet du vælger, hentes i <b>din egen browser</b> — det er derfor det virker på
+          butikker, der blokerer servere.
+        </li>
+        <li><b>Intet gemmes</b> af udvidelsen. Ingen historik, ingen baggrundsaktivitet.</li>
+        <li>Der sker <b>ingenting</b>, før du beder om det på dripd.</li>
+      </ul>
+
+      <button id="grant" type="button">Giv adgang</button>
+      <div class="status" id="status" role="status"></div>
+
+      <footer>
+        Du kan altid trække adgangen tilbage i din browsers indstillinger for udvidelser.
+      </footer>
+    </main>
+    <script src="onboarding.js"></script>
+  </body>
+</html>
