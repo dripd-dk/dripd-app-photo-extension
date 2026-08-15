@@ -27,17 +27,45 @@ export interface BridgeDeps {
   /** Send to the background and resolve with its reply. */
   send: (msg: unknown) => Promise<unknown>
   version?: string
+  /**
+   * Dev builds only: say why one of our own messages was ignored.
+   *
+   * These three checks are silent by design — a security boundary should not
+   * narrate itself to whatever page is probing it. But silence also means that
+   * "the extension is not there" and "the extension is there and rejected you"
+   * look identical from the page, and telling those apart by guesswork cost a
+   * whole debugging session.
+   */
+  log?: (...args: unknown[]) => void
 }
 
 export function installBridge(deps: BridgeDeps): () => void {
   const { win, send } = deps
+  const log = deps.log ?? (() => {})
 
   const onMessage = (event: MessageEvent) => {
-    if (event.source !== win) return
-    if (event.origin !== win.location.origin) return
-
     const msg = event.data as Record<string, unknown> | null
+    // Only ever narrate messages that claim to be ours; everything else on the
+    // page is none of our business and would drown the log.
+    const claimsOurs = !!msg && msg[MARKER] === true
+
+    if (event.source !== win) {
+      if (claimsOurs) {
+        log('ignored — event.source is not this window', {
+          source: event.source === null ? 'null' : String(event.source),
+          sameAsWin: event.source === win,
+          isTop: win === win.top,
+        })
+      }
+      return
+    }
+    if (event.origin !== win.location.origin) {
+      if (claimsOurs) log('ignored — origin', event.origin, 'expected', win.location.origin)
+      return
+    }
+
     if (!msg || msg[MARKER] !== true || msg.dir !== 'req') return
+    log('relaying', msg.kind)
 
     const nonce = msg.nonce
     const reply = (payload: Record<string, unknown>) => {
