@@ -98,8 +98,9 @@ function fakeApi(opts: FakeOptions = {}) {
       create(options) {
         log.tabsCreated.push(options)
         const id = nextId++
-        // The onboarding tab is not a popup; only the fallback path is.
-        if (options.active === false) log.tabIds.push(id)
+        // The onboarding tab is not a popup; the fallback tab is, and both are
+        // now created active, so the URL is what tells them apart.
+        if (!String(options.url ?? '').includes('onboarding')) log.tabIds.push(id)
         return Promise.resolve({ id })
       },
       get: () => Promise.resolve({ status: 'complete' }),
@@ -215,13 +216,13 @@ describe('ping', () => {
 })
 
 describe('harvest', () => {
-  it('opens an unfocused popup and leaves it open', async () => {
+  it('opens a focused popup and leaves it open', async () => {
     const { router, log } = build()
 
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
     expect(reply).toMatchObject({ ok: true, sessionId: 's1', harvest: HARVEST })
-    expect(log.windowsCreated[0]).toMatchObject({ type: 'popup', focused: false, url: PDP })
+    expect(log.windowsCreated[0]).toMatchObject({ type: 'popup', focused: true, url: PDP })
     // The page has not ranked yet — closing here would leave nothing to recover with.
     expect(log.windowsRemoved).toEqual([])
     expect(router.sessionCount()).toBe(1)
@@ -276,7 +277,7 @@ describe('harvest', () => {
     expect(router.sessionCount()).toBe(0)
   })
 
-  it('falls back to a focused popup, then to a background tab', async () => {
+  it('falls back to a plain popup, then to a tab', async () => {
     const one = build({ windowCreateFailures: 1 })
     await expect(one.router.handle({ kind: 'harvest', url: PDP })).resolves.toMatchObject({ ok: true })
     expect(one.log.windowsCreated).toHaveLength(2)
@@ -284,7 +285,7 @@ describe('harvest', () => {
 
     const both = build({ windowCreateFailures: 2 })
     await expect(both.router.handle({ kind: 'harvest', url: PDP })).resolves.toMatchObject({ ok: true })
-    expect(both.log.tabsCreated[0]).toMatchObject({ active: false })
+    expect(both.log.tabsCreated[0]).toMatchObject({ active: true })
   })
 
   it('closes the window and keeps no session when injection fails', async () => {

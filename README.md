@@ -106,9 +106,18 @@ A thumbnail in the frame is not a dead end: rewriting its `imwidth` to 2160
 returns a genuine 2160×3240 image, so framing a 116px thumb still captures the
 full-resolution photograph.
 
+**The cutout is a scaled-down copy of the window** — same aspect ratio, 80% of
+each axis — rather than the phone-shaped 3:4 portrait it started as. A desktop
+popup is landscape, and a portrait frame there wastes most of the window and makes
+the user hunt for a narrow strip. The scrim outside it is only 20% black: this is a
+guide, and the page under it has to stay readable while the user works.
+
 **The framed photo is ranked first, not auto-captured.** Framing is aim, not
 confirmation — a grab that caught the neighbouring tile has to stay one click from
 recovery, so the picker still opens with every candidate behind the framed one.
+That safety net matters more at this size: a frame covering most of the window
+overlaps almost everything on screen, so selection leans on the largest-overlap
+rule rather than on precise aim.
 
 **It never clicks anything on the page.** The overlay is `pointer-events: none`
 except its own button bar, so scrolling and dragging reach the retailer's page
@@ -220,5 +229,7 @@ out. **That means Johan, by hand, on H&M, Zara, ASOS, Zalando and Nike.**
 - **Firefox listing.** `npm run build:firefox` produces a loadable add-on;
   submission is out of scope, and its `optional_host_permissions` grant flow is
   unverified.
-- **`focused: false`** popup behaviour is unverified outside Chromium. The code
-  falls back to a focused popup, then to a background tab.
+- **Popup behaviour outside Chromium** is unverified. The window is created
+  `focused: true` — it is where the user does the work now, and an unfocused one
+  opened *behind* the browser — falling back to a plain popup, then to an active
+  tab.

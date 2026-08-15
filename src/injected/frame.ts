@@ -38,13 +38,21 @@ export interface Rect {
   height: number
 }
 
-/** Portrait, because garment photography is. A square cutout on a 3:4 product
- *  shot either crops the shoes off or swallows half the next tile. */
-export const CUTOUT_ASPECT = 3 / 4
-const CUTOUT_VIEWPORT_FRACTION = 0.66
-const MIN_CUTOUT = 200
+/**
+ * The cutout is a scaled-down copy of the window, so it always carries the
+ * window's own aspect ratio.
+ *
+ * It started portrait, on the reasoning that garment photography is. That is a
+ * phone's logic: this runs in a desktop popup, where a 3:4 frame wastes most of a
+ * landscape window and makes the user hunt for a narrow strip. Matching the window
+ * means the frame is simply "most of what you can see", which is what a desktop
+ * user is aiming with.
+ */
+const MAX_WIDTH_FRACTION = 0.96
+/** Never collapse to nothing on a very short window. */
+const MIN_SCALE = 0.3
 /** Vertical room reserved for the button bar, so the cutout never sits under it. */
-const BAR_RESERVE = 132
+const BAR_RESERVE = 108
 /**
  * Room above the cutout for the hint pill.
  *
@@ -70,16 +78,17 @@ export const HOST_ID = '__dripd_frame'
 export function cutoutRect(win: Window = window): Rect {
   const vw = win.innerWidth || 0
   const vh = win.innerHeight || 0
+  if (vw <= 0 || vh <= 0) return { left: 0, top: 0, width: 0, height: 0 }
 
-  const usable = Math.max(MIN_CUTOUT, vh - BAR_RESERVE - HINT_RESERVE)
-  let height = Math.max(MIN_CUTOUT, Math.min(vh * CUTOUT_VIEWPORT_FRACTION, usable))
-  let width = height * CUTOUT_ASPECT
-
-  const maxWidth = vw * 0.86
-  if (width > maxWidth) {
-    width = Math.max(0, maxWidth)
-    height = width / CUTOUT_ASPECT
-  }
+  // One scale factor applied to both axes is what keeps the cutout's aspect
+  // identical to the window's — derive either dimension independently and it
+  // stops being a copy of the window the moment the reserves bite.
+  const scale = Math.max(
+    MIN_SCALE,
+    Math.min(MAX_WIDTH_FRACTION, (vh - HINT_RESERVE - BAR_RESERVE) / vh),
+  )
+  const width = vw * scale
+  const height = vh * scale
 
   return {
     left: Math.max(0, (vw - width) / 2),
@@ -225,7 +234,7 @@ const CSS = `
 .cutout {
   position: absolute;
   border-radius: 18px;
-  box-shadow: 0 0 0 100vmax rgba(20, 19, 17, 0.62);
+  box-shadow: 0 0 0 100vmax rgba(20, 19, 17, 0.2);
   outline: 2px solid rgba(255, 255, 255, 0.92);
   outline-offset: -1px;
   transition: opacity 160ms ease;

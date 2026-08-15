@@ -38,8 +38,12 @@
  * image loading and carousels on it; `setTimeout` is clamped there, so the settle
  * choreography crawls; and viewport-proximity lazy loading frequently never fires,
  * leaving a harvest of one hero image. Hidden is also a plausible automation
- * signal, so it is arguably more suspicious rather than safer. A real, visible,
- * unfocused popup that closes itself is both more honest and more effective.
+ * signal, so it is arguably more suspicious rather than safer. A real, visible
+ * popup that closes itself is both more honest and more effective.
+ *
+ * It is also **focused**, which it was not originally. Once the user became the
+ * one operating that window, a popup opening behind the browser meant the studio
+ * asked them to frame a photo in a window they could not see.
  */
 
 import {
@@ -313,15 +317,22 @@ export function createRouter(deps: RouterDeps): Router {
     }, ttlMs)
   }
 
-  /** Visible and unfocused if the browser allows it, focused if not, a background
-   *  tab if it refuses popups altogether. */
+  /**
+   * A focused popup, falling back to whatever the browser will give us.
+   *
+   * This opened unfocused at first, to be unobtrusive. That was right when the
+   * extension harvested by itself and the window was incidental — it is wrong now
+   * that the window is where the user does the work. An unfocused popup opens
+   * *behind* the browser, so the studio says "frame the photo" while the thing to
+   * frame it in is invisible.
+   */
   async function openPopup(url: string): Promise<{ windowId: number | null; tabId: number } | null> {
     const attempts: Array<() => Promise<WindowInfo>> = [
       () =>
         api.windows.create({
           url,
           type: 'popup',
-          focused: false,
+          focused: true,
           width: POPUP_WIDTH,
           height: POPUP_HEIGHT,
         }),
@@ -339,7 +350,9 @@ export function createRouter(deps: RouterDeps): Router {
     }
 
     try {
-      const tab = await api.tabs.create({ url, active: false })
+      // Active, for the same reason: a background tab the user never sees is a
+      // viewfinder they can never reach.
+      const tab = await api.tabs.create({ url, active: true })
       if (tab?.id != null) return { windowId: null, tabId: tab.id }
     } catch (e) {
       log('tabs.create failed', e)

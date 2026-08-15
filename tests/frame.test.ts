@@ -9,7 +9,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  CUTOUT_ASPECT,
   cutoutRect,
   HINT_RESERVE,
   framedImage,
@@ -55,30 +54,47 @@ function viewport(width: number, height: number): Window {
 }
 
 describe('cutoutRect', () => {
-  it('is portrait, centred, and clear of the button bar', () => {
+  // A desktop popup is landscape; a 3:4 frame wasted most of it and made the
+  // user hunt for a narrow strip. The frame is a scaled copy of the window now.
+  it.each([
+    ['landscape desktop', 1280, 960],
+    ['wide', 1920, 900],
+    ['narrow and tall', 360, 1200],
+  ])('carries the window aspect ratio (%s)', (_label, vw, vh) => {
+    const r = cutoutRect(viewport(vw, vh))
+
+    expect(r.width / r.height).toBeCloseTo(vw / vh, 5)
+    expect(r.left + r.width / 2).toBeCloseTo(vw / 2, 5)
+  })
+
+  it('fills most of the window without colliding with the chrome around it', () => {
     const r = cutoutRect(viewport(1280, 960))
 
-    expect(r.width / r.height).toBeCloseTo(CUTOUT_ASPECT, 5)
-    expect(r.left + r.width / 2).toBeCloseTo(640, 5)
+    // "Way bigger" is the requirement, so hold a floor on it: anything much
+    // under this and the frame is back to being a strip in the middle.
+    expect(r.width).toBeGreaterThan(1280 * 0.7)
+    expect(r.height).toBeGreaterThan(960 * 0.7)
+
     // The bar owns the bottom of the viewport; the frame must not sit under it.
-    expect(r.top + r.height).toBeLessThan(960 - 100)
+    expect(r.top + r.height).toBeLessThanOrEqual(960 - 100)
     // And the hint pill above it must not end up behind a sticky site header,
     // which is exactly what a too-small reserve produced.
     expect(r.top).toBeGreaterThanOrEqual(HINT_RESERVE)
   })
 
-  it('gives up height rather than run off a narrow window', () => {
-    const r = cutoutRect(viewport(360, 1200))
-
-    expect(r.width).toBeLessThanOrEqual(360 * 0.86)
-    expect(r.left).toBeGreaterThan(0)
-    expect(r.width / r.height).toBeCloseTo(CUTOUT_ASPECT, 5)
-  })
-
-  it('still returns a usable frame in a tiny window', () => {
-    const r = cutoutRect(viewport(320, 240))
-    expect(r.width).toBeGreaterThan(0)
-    expect(r.height).toBeGreaterThan(0)
+  it('stays inside the window it is scaled from', () => {
+    for (const [vw, vh] of [
+      [1280, 960],
+      [1920, 900],
+      [360, 1200],
+      [320, 240],
+    ] as const) {
+      const r = cutoutRect(viewport(vw, vh))
+      expect(r.width).toBeGreaterThan(0)
+      expect(r.height).toBeGreaterThan(0)
+      expect(r.left).toBeGreaterThanOrEqual(0)
+      expect(r.left + r.width).toBeLessThanOrEqual(vw + 0.001)
+    }
   })
 })
 
