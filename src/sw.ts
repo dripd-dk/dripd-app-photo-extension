@@ -32,4 +32,20 @@ api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true
 })
 
+/**
+ * The toolbar button opens the grant page.
+ *
+ * Without this there is a dead end on Safari: host access has to be granted
+ * before the content script runs, the content script is what lets the studio see
+ * the extension, and the studio is what opens this page. The user is told to
+ * install something that is already installed, with no way to reach the
+ * instructions. A toolbar button is the one entry point that always works.
+ *
+ * `onClicked` only fires when no `default_popup` is declared, which is why the
+ * manifest declares none.
+ */
+api.action?.onClicked?.addListener(() => {
+  void api.tabs.create({ url: api.runtime.getURL('onboarding.html'), active: true })
+})
+
 console.log('[dripd] background ready', VERSION)

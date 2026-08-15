@@ -99,6 +99,22 @@
       .promises a { color: var(--brand); text-decoration: none; }
       .promises a:hover { text-decoration: underline; }
 
+      .safari-help {
+        align-self: stretch;
+        text-align: left;
+        margin: 0;
+        padding: 22px 28px 22px 44px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        color: var(--muted);
+      }
+      .safari-help[hidden] { display: none; }
+      .safari-help b { color: var(--ink); font-weight: 600; }
+
       .actions {
         align-self: stretch;
         display: flex;
@@ -192,6 +208,15 @@
           >
         </div>
       </div>
+
+      <!-- Safari grants host access from its own Settings, per site, and shows no
+           prompt for `permissions.request()`. Shown only there — `onboarding.ts`
+           unhides it, and also if any browser leaves the request unanswered. -->
+      <ol id="safari-help" class="safari-help" hidden>
+        <li>Åbn <b>Safari → Indstillinger → Udvidelser</b></li>
+        <li>Vælg <b>dripd</b> i listen til venstre</li>
+        <li>Sæt <b>dripd.dk</b> til <b>Tillad altid</b></li>
+      </ol>
 
       <div class="actions">
         <button id="grant" type="button">Giv tilladelse</button>
