@@ -1,235 +1,197 @@
-# dripd-capture
+# dripd photo extension
 
-The browser extension that lets the dripd studio read product images from a
-retailer's page. It does the three things a web page cannot:
+When you're building an outfit on [dripd.dk](https://dripd.dk) and you paste a link
+to something in a shop, this extension fetches that product's photo so you can drop
+it straight into your fit.
 
-1. Open a retailer page in a real browser.
-2. Let the user point at the photo they want, on that page, and read its URL off
-   the DOM at that moment.
-3. Fetch the chosen image's bytes with the user's own session and IP.
+That's all it does. It has no interface of its own beyond one page asking your
+permission, it doesn't run in the background, and it stores nothing.
 
-Step 2 is the only UX that lives here rather than in dripd-app, and it has to:
-the page being framed is the retailer's, and nothing on dripd.dk can draw on it
-or read what is under the frame.
+**You shouldn't have to take our word for any of that.** The whole thing is here,
+it's about 1,500 lines, and the section below shows you how to check it yourself —
+including how to have an AI read it for you if you'd rather not read code.
 
-That second one is the whole reason this exists. `image.hm.com` answers a
-residential browser with 200, a datacenter IP with 403, and a page-context
-`fetch` with nothing at all — it sends no `Access-Control-Allow-Origin`, so the
-background context of an extension is the only place in the stack that can read
-those bytes.
+---
 
-**Nothing is stored.** No `storage` permission, no history, no background
-activity. Bytes pass through to the page and the page holds them in memory until
-the user publishes an outfit.
+## How it works
 
-## Try it (dev)
+1. You paste a product link in the dripd studio and press **Hent billeder**.
+2. The extension opens the shop's page in a window, with a frame over it.
+3. You scroll until the photo you want is inside the frame, and press the button.
+4. That photo goes into your fit. The window closes.
+
+Nothing is collected before you press that button. The extension doesn't decide
+which photo you meant — you do, by framing it.
+
+### Why an extension is needed at all
+
+Most big shops serve their images from servers that refuse requests coming from
+another website's code, and often refuse requests from data centres entirely. A
+normal web page — including dripd.dk — simply cannot download those images. A
+browser extension running in *your* browser can, because to the shop it looks like
+you browsing, which is what it is.
+
+That's the entire reason this exists. If shops allowed it, dripd would do this on
+its own servers and you'd have nothing to install.
+
+---
+
+## Audit it yourself
+
+You don't need to trust a privacy policy. Here's how to check.
+
+### The fast version, with an AI
+
+Clone the repo and point an AI coding assistant at it:
 
 ```bash
-npm install && npm run build:dev
+git clone https://github.com/dripd-dk/dripd-app-photo-extension
+cd dripd-app-photo-extension
 ```
 
-Then, in Chrome:
+Then ask it something like:
 
-0. **Remove the dev stub first** (`dripd capture (dev stub)`, from
-   `dripd-app/scripts/dev-capture-stub/`). It matches `localhost:3000` too, so with
-   both loaded two extensions answer every request and you will be debugging the
-   wrong one.
-1. `chrome://extensions` → **Developer mode** on → **Load unpacked** →
-   pick the **`dist-dev/`** folder (not `dist/` — the dev build is the one that
-   matches `localhost:3000`).
-2. Open the studio at `http://localhost:3000`, paste a product link, press
-   **Hent billeder**.
-3. The first capture opens a dripd tab asking for host access. Press **Giv
-   adgang** and accept your browser's prompt, then press **Hent billeder** again.
+> Read this browser extension's source. Ignore the README and comments — they can
+> lie. Answer from the code only:
+>
+> 1. What data leaves my machine, to which domains, and on what trigger?
+> 2. Can any website other than dripd.dk cause this extension to do anything?
+> 3. Does it read, store, or transmit browsing history, cookies, form input,
+>    passwords, or the contents of pages I visit normally?
+> 4. Does anything run when I am not actively using it?
+> 5. Is there any obfuscated, minified, dynamically evaluated, or remotely loaded
+>    code?
+> 6. What is the worst thing a malicious version of this extension could do with
+>    the permissions it requests in `manifest.json`?
 
-Expect: a popup window opens on the retailer's page with a viewfinder over it.
-**Nothing is collected yet.** Scroll the page until the photo you want sits inside
-the frame, press **Hent billeder** in that window, and the studio's picker fills
-with the framed photo first.
+Question 6 is the important one, and the honest answer isn't "nothing" — see
+[What it could do, if we were lying](#what-it-could-do-if-we-were-lying).
 
-There is **no permission prompt at install time** — `https://*/*` is declared
-`optional_host_permissions`, so the ask arrives later, in context, from the
-onboarding page. (An earlier version of these instructions claimed the install
-prompted; it does not.)
+**Where the answers live.** It's a small codebase; these are the files that matter:
 
-### Watching it work
-
-`chrome://extensions` → dripd → **service worker** opens the background console.
-A capture logs two lines — one when the viewfinder goes up, one when the user
-presses the button:
-
-```
-[dripd] framing 3f1c… https://www2.hm.com/da_dk/productpage.1358428002.html
-[dripd] harvest 3f1c… 41 images { version: 2, consentDismissed: true, framed: true, framedMatches: 2 }
-```
-
-- `framed` — was there an image inside the cutout at all? `false` means the user
-  pressed the button with an empty frame; they still get a ranked picker.
-- `framedMatches` — how many harvest rows the framed element accounted for. One
-  `<img>` contributes its `currentSrc`, `src` and widest `srcset` rendition, so
-  1–3 is normal.
-
-`framed: true` with `framedMatches: 0` is contradictory and worth reporting: the
-viewfinder found an `<img>` that `collect` did not record, which silently drops
-the user's choice back to plain server ranking.
-
-A `framing` line with no `harvest` line after it is a session the user closed,
-cancelled, or walked away from — all three are normal.
-
-## Why the user frames it
-
-Measured on a real H&M PDP in a warm consumer Chrome, 2026-08-14:
-
-| DOM state | gallery photos | 116px thumbs | unrelated product cards |
-|---|---|---|---|
-| fresh load | 3 | 2 | **0** |
-| after browsing the carousel | 6 | 1 | 9 |
-| after a full-page scroll | **3 — unchanged** | 2 | 9 |
-
-The gallery is a Splide carousel whose slides load on *interaction*, so a page
-this extension merely opens shows three of six photos. Scrolling adds **zero**
-and drags in nine related-product cards that no size or URL heuristic tells apart
-from product photos.
-
-An earlier version answered that by driving the carousel itself — generic
-thumbnail clicks, next-buttons, arrow keys — and unioning each harvest. It worked
-on H&M and was still the wrong shape: on a page where the thumbnail strip and the
-related-products rail are indistinguishable to a generic selector, the garment the
-user actually wants is one tile among thirty, and the extension is guessing which.
-
-So the person who knows says so. The popup opens with a viewfinder over the page,
-they scroll the photo into it, and `collect` runs on their button press and not
-before. The carousel gets advanced by the user, which is the one mechanism that
-was never going to break on the next retailer.
-
-A thumbnail in the frame is not a dead end: rewriting its `imwidth` to 2160
-returns a genuine 2160×3240 image, so framing a 116px thumb still captures the
-full-resolution photograph.
-
-**The cutout is a scaled-down copy of the window** — same aspect ratio, 80% of
-each axis — rather than the phone-shaped 3:4 portrait it started as. A desktop
-popup is landscape, and a portrait frame there wastes most of the window and makes
-the user hunt for a narrow strip. The scrim outside it is only 20% black: this is a
-guide, and the page under it has to stay readable while the user works.
-
-**The framed photo is ranked first, not auto-captured.** Framing is aim, not
-confirmation — a grab that caught the neighbouring tile has to stay one click from
-recovery, so the picker still opens with every candidate behind the framed one.
-That safety net matters more at this size: a frame covering most of the window
-overlaps almost everything on screen, so selection leans on the largest-overlap
-rule rather than on precise aim.
-
-**It never clicks anything on the page.** The overlay is `pointer-events: none`
-except its own button bar, so scrolling and dragging reach the retailer's page
-underneath, and the extension itself never follows a link.
-
-## Layout
-
-| File | Responsibility |
+| File | Why it matters |
 |---|---|
-| `src/protocol.ts` | The wire contract with dripd-app. Read this first |
-| `src/router.ts` | Verbs, popup lifecycle, sessions, byte fetching — all testable |
-| `src/sw.ts` | Background wiring. Eight lines |
-| `src/bridge.ts` | The relay and its origin checks — the security boundary |
-| `src/bridge.content.ts` | Content-script wiring |
-| `src/injected/collect.ts` | Read images and metadata off a DOM |
-| `src/injected/consent.ts` | Reject a cookie wall. Never accepts |
-| `src/injected/frame.ts` | The viewfinder, and what counts as framed |
-| `src/injected/index.ts` | Installs `__dripdHarvest` in the isolated world |
-| `src/permissions.ts` + `onboarding.*` | The one-time host grant |
+| `manifest.json` | Every permission it can ever have |
+| `src/bridge.ts` | The gate. Decides which pages may talk to the extension |
+| `src/router.ts` | Everything the extension can be asked to do |
+| `src/injected/collect.ts` | What it reads off a shop's page |
+| `src/injected/frame.ts` | The frame you aim with |
+| `src/permissions.ts` | What access it asks for, and when |
 
-Three verbs the page can call, and a fourth it cannot:
+### The thorough version
 
-| Verb | Meaning |
-|---|---|
-| `harvest(url)` | Opens the popup, **waits for the user to frame a photo**, leaves it open |
-| `fetchBytes(sessionId, url)` | Fetches in that session; **extends its TTL** |
-| `resolve(sessionId, action)` | **Window only:** closes or surfaces it |
-| `framed(sessionId, …)` | Sent by the overlay, not the page. Settles `harvest` |
+An AI reading the source tells you the source is clean. It doesn't tell you the
+extension **you installed** was built from that source. To check that, build it
+yourself and compare:
 
-`harvest` is the one that changed shape. It used to answer in seconds; it now
-parks on a human and can stay pending for minutes. Three things end that wait —
-the frame timeout (5 min), the tab being closed, and the Annullér button — and all
-three reject rather than hang, because a hang upstream is a studio stuck on a
-spinner. The page side allows six minutes for this verb alone, deliberately above
-the extension's own ceiling so the specific reason arrives before a generic
-timeout does.
+```bash
+npm install
+npm run build          # → dist/
+```
 
-`resolve` closes the *window*, not the *session*. The page ranks the harvest
-server-side and resolves at that point — before the user has picked anything — so
-a session that died on resolve would fail every later `fetchBytes` and no capture
-could ever complete. Sessions instead carry their own 60 s TTL, extended by each
-fetch, which doubles as the valve that stops a crashed page leaking a popup.
+Then unpack the version you installed from the store and diff the two. The build is
+deliberately **not minified** for exactly this reason — the shipped JavaScript is
+meant to stay readable, so a reviewer can compare it line by line.
 
-## Security
-
-The extension is functionally a CORS-bypass proxy holding the user's cookies. The
-`content_scripts.matches` list is the only thing stopping any website from
-driving it, so treat it as code, not configuration:
-
-- `matches` is dripd's origin only. No `http:` in the production build.
-- The relay requires `event.source === window` **and**
-  `event.origin === location.origin`, so an iframe embedded in a dripd page
-  cannot drive it.
-- Every message carries a page-issued nonce, and a direction: the page sends
-  `dir: 'req'` and accepts only `dir: 'res'`. That discriminator is load-bearing
-  — `window.postMessage` delivers a page's own message to its own listeners, so
-  without it every request rejects itself milliseconds after being sent. The page
-  side once shipped that way, non-functional, with thirteen green tests.
-- The background never fetches a URL that did not arrive through the bridge, and
-  never anything that is not `https:`.
-
-One consequence worth knowing: MV3 idle-terminates a background service worker
-after roughly 30 seconds, which would drop the session map and its TTL timer
-mid-pick and orphan the popup. While any session is alive the worker therefore makes
-one throwaway API call every 20 seconds to reset that idle timer, and stops the
-moment the last session ends. The alternative — persisting sessions — would mean
-adding a `storage` permission for state that is worthless after a restart.
-
-## Tests
+Run the tests too, since they document the security rules as executable checks:
 
 ```bash
 npm test
 ```
 
-80 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot
-run against a stale `dist/`.
+Look at `tests/bridge.test.ts` in particular. It's the one asserting that pages
+which aren't dripd.dk get ignored.
 
-- `collect` / `consent` / `key` / `frame` — pure functions over a happy-dom DOM.
-  The `frame` tests feed rects in through a `data-rect` attribute, because
-  happy-dom does no layout: every element reports 0×0, so a selection test
-  written against real geometry passes without deciding anything.
-- `router` — the full session lifecycle against a faked extension API: the window
-  stays open after `harvest`, `dismiss` closes it, `surface` focuses it, and
-  **`fetchBytes` still works after either** (the test that stops someone
-  "fixing" resolve into a session teardown). Plus TTL expiry dismissing an open
-  window, re-arming on fetch, the popup→tab fallback chain, and every rejection
-  path.
-- `router`, framing — that nothing is collected before the button is pressed, and
-  that all three endings (closed tab, Annullér, timeout) reject, close the window
-  and leave no session or pending promise behind. The fake presses the button
-  from inside `executeScript`, which is where a real user would.
-- `bridge` — the origin, source and direction checks against a **real** window.
-  Note the fidelity gap called out in that file: happy-dom does not populate
-  `MessageEvent.source`, so inbound requests are dispatched explicitly. Without
-  that, three of those tests pass vacuously — which is exactly the trap that hid
-  the direction bug the first time.
-- `injected-bundle` — evaluates the built `dist/injected.js` the way the browser
-  does, catching a bundle that imports something the build left out.
+### Watch it work, live
 
-What tests cannot cover is the only thing that can still kill this design: whether
-an extension-driven popup on an Akamai-fronted product page yields a full harvest.
-A popup is not a hand-typed navigation, and only a warm consumer profile can find
-out. **That means Johan, by hand, on H&M, Zara, ASOS, Zalando and Nike.**
+`chrome://extensions` → dripd → **service worker** opens its console. Every capture
+logs exactly what it did. If it ever logs something when you *aren't* capturing,
+that's a bug worth reporting — [open an issue](https://github.com/dripd-dk/dripd-app-photo-extension/issues).
 
-## Not built yet
+---
 
-- **Safari** needs a native wrapper, Xcode and App Store review. The code avoids
-  `browser.identity` (Safari has none) precisely so this stays possible.
-- **Firefox listing.** `npm run build:firefox` produces a loadable add-on;
-  submission is out of scope, and its `optional_host_permissions` grant flow is
-  unverified.
-- **Popup behaviour outside Chromium** is unverified. The window is created
-  `focused: true` — it is where the user does the work now, and an unfocused one
-  opened *behind* the browser — falling back to a plain popup, then to an active
-  tab.
+## The permissions, in plain language
+
+| Permission | What it's for | What it isn't |
+|---|---|---|
+| `scripting` | Put the frame on the shop's page, and read that page's image addresses when you press the button | It can't run anywhere you haven't sent it |
+| `tabs` | Open the shop window and close it afterwards | It does **not** grant reading your tabs' contents, history, or URLs |
+| `https://*/*` *(optional)* | Download the photo from whichever shop you linked to | Asked for when you first capture, not at install. Revocable any time |
+
+That last one is the big one, and it's deliberately **optional** — that's why
+installing this prompts you for nothing, and why the request arrives later, in
+context, on a page explaining it.
+
+There is **no** `storage` permission. The extension physically cannot remember
+anything between restarts.
+
+### What it could do, if we were lying
+
+Being straight with you: `https://*/*` is broad. An extension with it could read
+pages you visit and send them anywhere. That's true of this one's *permissions* —
+what stops it is the code, which is why the code is public.
+
+The specific things to verify, if you're checking rather than trusting:
+
+- `content_scripts.matches` in `manifest.json` lists **only** dripd.dk. That's the
+  only page allowed to talk to the extension at all.
+- `src/bridge.ts` additionally checks the message came from the page itself and not
+  from an embedded frame.
+- Nothing here fetches a URL that didn't arrive through that gate, and nothing
+  non-`https:` ever gets fetched.
+- There's no analytics endpoint, no telemetry, and no remote configuration. The
+  only network request the extension ever makes is downloading the photo you chose.
+
+If you find that any of the above isn't true, that's a security bug and we want to
+hear about it.
+
+---
+
+## Install
+
+Not in the browser stores yet. To run it now, build it and load it unpacked:
+
+```bash
+npm install
+npm run build
+```
+
+**Chrome / Edge / Brave / Arc:** `chrome://extensions` → enable **Developer mode** →
+**Load unpacked** → select `dist/`.
+
+**Firefox:** `npm run build:firefox`, then `about:debugging#/runtime/this-firefox` →
+**Load Temporary Add-on** → select any file in `dist-firefox/`.
+
+**Safari:** it can't load a folder — the extension has to be wrapped in a native
+app. See [`docs/SAFARI.md`](docs/SAFARI.md).
+
+## Browser support
+
+| Browser | State |
+|---|---|
+| Chrome | Works |
+| Edge, Brave, Opera, Arc, Vivaldi | Same engine as Chrome; should work, not yet tested |
+| Firefox | Builds and loads. Not yet tested in earnest |
+| Safari | Wrapper app builds; nothing beyond that verified — see [`docs/SAFARI.md`](docs/SAFARI.md) |
+
+Firefox needs its own build because it can't use Chrome's background service worker
+([bug 1573659](https://bugzilla.mozilla.org/show_bug.cgi?id=1573659)). One manifest
+carries both forms and each build drops the one its browser doesn't want.
+
+## Development
+
+```bash
+npm run build:dev   # also matches localhost:3000, for working on dripd itself
+npm test            # 83 tests, no browser required
+npm run typecheck
+```
+
+Architecture and design decisions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Privacy
+
+[`PRIVACY.md`](PRIVACY.md) — short, and written to be read.
+
+## Licence
+
+MIT. See [`LICENSE`](LICENSE).

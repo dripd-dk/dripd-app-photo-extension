@@ -81,6 +81,9 @@ await cp(resolve(root, 'src/onboarding.html'), resolve(outdir, 'onboarding.html'
 // Georgia fallback. Bundled rather than fetched: a store reviewer reading this
 // manifest should find no network access at all, and there is none.
 await cp(resolve(root, 'src/fonts'), resolve(outdir, 'fonts'), { recursive: true })
+// The stores all require an icon set, and Safari's converter refuses to build one
+// without it. Sizes come from the brand logopack.
+await cp(resolve(root, 'src/icons'), resolve(outdir, 'icons'), { recursive: true })
 
 const matches = manifest.content_scripts[0].matches.join(', ')
 console.log(`built ${target}${dev ? ' (dev)' : ''} → ${outdir}`)

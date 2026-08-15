@@ -95,6 +95,9 @@
       .promises .tick { flex: none; color: var(--brand); font-weight: 700; }
       .promises span:last-child { color: var(--muted); }
       .promises strong { color: var(--ink); font-weight: 600; }
+      /* The design's own global rule: a { color:#059669; text-decoration:none } */
+      .promises a { color: var(--brand); text-decoration: none; }
+      .promises a:hover { text-decoration: underline; }
 
       .actions {
         align-self: stretch;
@@ -168,16 +171,25 @@
           <span class="tick">✓</span>
           <span>Henter, gemmer eller ændrer <strong>aldrig personlige data</strong></span>
         </div>
+        <!-- The design reads "ingen cookies" flat. The byte fetch uses
+             `credentials: 'include'`, so the shop's own cookies do travel with it —
+             that is precisely why it works where a server-side download fails.
+             "Gemmer ingen cookies" is the true version of the same promise. -->
         <div>
           <span class="tick">✓</span>
-          <span>Ingen tracking, ingen annoncer, ingen cookies</span>
+          <span>Ingen tracking, ingen annoncer — og vi gemmer ingen cookies</span>
         </div>
-        <!-- The design links "GitHub" here. The repository is not public yet, so
-             there is no URL to link and inventing one would be a false claim on a
-             privacy page. Restore the link when the repo is published. -->
         <div>
           <span class="tick">✓</span>
-          <span><strong>Open source</strong> — koden kan auditeres på GitHub</span>
+          <span
+            ><strong>Open source</strong> — koden kan auditeres på
+            <a
+              href="https://github.com/dripd-dk/dripd-app-photo-extension"
+              target="_blank"
+              rel="noopener noreferrer"
+              >GitHub</a
+            ></span
+          >
         </div>
       </div>
 
