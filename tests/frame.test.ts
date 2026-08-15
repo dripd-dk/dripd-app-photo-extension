@@ -257,4 +257,18 @@ describe('mountFrameOverlay', () => {
     mount().destroy()
     expect(document.getElementById(HOST_ID)).toBeNull()
   })
+
+  it('draws the frame edge in both tones', () => {
+    // Regression guard, and the one thing 82 tests missed: with a single white
+    // edge over a 20% scrim the frame was invisible on a white retailer page and
+    // only appeared once a dark photo scrolled under it. happy-dom does no paint,
+    // so contrast itself is untestable — what is testable is that the edge still
+    // declares a light component and a dark one.
+    mount()
+    const css = shadow().querySelector('style')!.textContent!
+    const rule = css.slice(css.indexOf('.cutout {'), css.indexOf('.tick {'))
+
+    expect(rule).toMatch(/rgba\(255,\s*255,\s*255/)
+    expect(rule).toMatch(/rgba\(20,\s*19,\s*17,\s*0\.5\)/)
+  })
 })

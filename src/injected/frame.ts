@@ -231,12 +231,22 @@ const CSS = `
 /* One element paints the whole scrim: an enormous spread shadow covers the
    viewport and the element's own box is the hole. Cheaper and crisper than four
    divs, and the rounded corners come free. */
+/* The frame edge must read on ANY page, so it is two-tone: white against dark
+   content, a dark ring against light. A single white outline was invisible on a
+   white retailer page — the frame only appeared once the user scrolled and a dark
+   product photo passed under the edge. A 20% scrim cannot carry that contrast on
+   its own, so the edge has to carry it itself.
+   One element still paints everything: an enormous spread shadow covers the
+   viewport and this element's own box is the hole. Shadows paint first-on-top, so
+   the rings are listed before the scrim. */
 .cutout {
   position: absolute;
   border-radius: 18px;
-  box-shadow: 0 0 0 100vmax rgba(20, 19, 17, 0.2);
-  outline: 2px solid rgba(255, 255, 255, 0.92);
-  outline-offset: -1px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.9),
+    0 0 0 1px rgba(255, 255, 255, 0.9),
+    0 0 0 3px rgba(20, 19, 17, 0.5),
+    0 0 0 100vmax rgba(20, 19, 17, 0.2);
   transition: opacity 160ms ease;
 }
 .tick {
@@ -244,6 +254,8 @@ const CSS = `
   width: 26px;
   height: 26px;
   border: 3px solid #34d399;
+  /* Same problem, same reasoning: emerald on a white page needs its own edge. */
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
 }
 .tick.tl { top: -3px; left: -3px; border-right: 0; border-bottom: 0; border-radius: 18px 0 0 0; }
 .tick.tr { top: -3px; right: -3px; border-left: 0; border-bottom: 0; border-radius: 0 18px 0 0; }
@@ -286,16 +298,18 @@ button {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 button:disabled { background: #6b7d75; cursor: default; }
+/* Carries its own background for the same reason the frame edge carries its own
+   contrast: bare white text sat on whatever the retailer's page happened to be,
+   and on a white one it simply was not there. */
 .cancel {
-  background: none;
+  background: rgba(20, 19, 17, 0.72);
   box-shadow: none;
-  padding: 2px 10px;
+  padding: 6px 14px;
   font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.78);
-  text-decoration: underline;
+  color: rgba(255, 255, 255, 0.9);
 }
-.cancel:disabled { background: none; color: rgba(255, 255, 255, 0.4); }
+.cancel:disabled { background: rgba(20, 19, 17, 0.4); color: rgba(255, 255, 255, 0.45); }
 `
 
 export interface FrameOverlayOpts {
