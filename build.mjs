@@ -61,6 +61,12 @@ if (dev) {
   // The matches list is a security boundary — the extension is a CORS-bypass
   // proxy, so widening it is a deliberate, dev-only act, never a default.
   manifest.content_scripts[0].matches.push(...DEV_MATCHES)
+  // Firefox MV3 makes host permissions opt-in, and a declared content script
+  // does not run until its site is granted. The production grant is
+  // `https://*/*`, which cannot cover an http dev server — so on Firefox the
+  // dev build silently had no bridge at all, with nothing in the permissions UI
+  // to switch on. Declaring them gives the user something to grant.
+  manifest.optional_host_permissions.push(...DEV_MATCHES)
   manifest.name = 'dripd (dev)'
 }
 
