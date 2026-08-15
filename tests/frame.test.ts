@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CUTOUT_ASPECT,
   cutoutRect,
+  HINT_RESERVE,
   framedImage,
   framedUrls,
   markFramed,
@@ -61,7 +62,9 @@ describe('cutoutRect', () => {
     expect(r.left + r.width / 2).toBeCloseTo(640, 5)
     // The bar owns the bottom of the viewport; the frame must not sit under it.
     expect(r.top + r.height).toBeLessThan(960 - 100)
-    expect(r.top).toBeGreaterThanOrEqual(56)
+    // And the hint pill above it must not end up behind a sticky site header,
+    // which is exactly what a too-small reserve produced.
+    expect(r.top).toBeGreaterThanOrEqual(HINT_RESERVE)
   })
 
   it('gives up height rather than run off a narrow window', () => {

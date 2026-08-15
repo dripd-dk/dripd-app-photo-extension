@@ -45,8 +45,18 @@ const CUTOUT_VIEWPORT_FRACTION = 0.66
 const MIN_CUTOUT = 200
 /** Vertical room reserved for the button bar, so the cutout never sits under it. */
 const BAR_RESERVE = 132
-/** Room above for the hint pill. */
-const TOP_RESERVE = 56
+/**
+ * Room above the cutout for the hint pill.
+ *
+ * Must cover the pill's own height plus a margin, not just the gap: at 56 the
+ * two-line pill landed at y=8 on a 720px viewport, flush with the top edge and
+ * behind the retailer's sticky header. The cutout gives up vertical centring for
+ * this — an off-centre frame is fine, an unreadable instruction is not.
+ */
+export const HINT_RESERVE = 84
+/** Gap between the pill's top and the cutout's, so `HINT_RESERVE - HINT_OFFSET`
+ *  is the margin left above the pill. */
+const HINT_OFFSET = 60
 
 export const HOST_ID = '__dripd_frame'
 
@@ -61,7 +71,7 @@ export function cutoutRect(win: Window = window): Rect {
   const vw = win.innerWidth || 0
   const vh = win.innerHeight || 0
 
-  const usable = Math.max(MIN_CUTOUT, vh - BAR_RESERVE - TOP_RESERVE)
+  const usable = Math.max(MIN_CUTOUT, vh - BAR_RESERVE - HINT_RESERVE)
   let height = Math.max(MIN_CUTOUT, Math.min(vh * CUTOUT_VIEWPORT_FRACTION, usable))
   let width = height * CUTOUT_ASPECT
 
@@ -73,7 +83,7 @@ export function cutoutRect(win: Window = window): Rect {
 
   return {
     left: Math.max(0, (vw - width) / 2),
-    top: Math.max(TOP_RESERVE, (vh - BAR_RESERVE - height) / 2),
+    top: Math.max(HINT_RESERVE, (vh - BAR_RESERVE - height) / 2),
     width,
     height,
   }
@@ -337,7 +347,7 @@ export function mountFrameOverlay(opts: FrameOverlayOpts): FrameOverlay {
     cutout.style.width = `${r.width}px`
     cutout.style.height = `${r.height}px`
     hint.style.left = `${r.left + r.width / 2}px`
-    hint.style.top = `${Math.max(8, r.top - 52)}px`
+    hint.style.top = `${Math.max(8, r.top - HINT_OFFSET)}px`
   }
 
   let frame: number | null = null
