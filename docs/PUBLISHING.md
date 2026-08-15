@@ -85,7 +85,23 @@ justification in plain language, and they are checked against what the code does
 | `tabs` | Opens the shop page in a window and closes it afterwards. Not used to read tab contents, history or URLs. |
 | Host permission `https://*/*` | Downloads the chosen image from whichever shop the user linked to. Shops' image servers refuse requests from other websites, so this can only happen in the user's own browser. Requested at first use, not at install. |
 | Remote code | **No.** Everything executed ships in the package. |
-| Data usage | Not collected, not sold, not transferred. Certify all three. |
+| Data usage | Tick **Website content** — nothing else. See below. |
+
+**Tick "Website content", and nothing else.** The extension reads image addresses
+and the product's public name, brand and price off a shop page and hands them to
+dripd. That is Chrome's "Website content" category, and it must match what we told
+Mozilla (`data_collection_permissions: ["websiteContent"]`) — a reviewer comparing
+two listings that disagree has found a reason to ask questions.
+
+Do **not** tick personally identifiable information, health, financial,
+authentication, personal communications, location, web history or user activity.
+None of them are true, and the code shows it.
+
+Then certify all three statements. Each is true as written:
+
+- not sold to third parties
+- not used or transferred for purposes unrelated to the item's single purpose
+- not used or transferred to determine creditworthiness or for lending
 
 Also set:
 
