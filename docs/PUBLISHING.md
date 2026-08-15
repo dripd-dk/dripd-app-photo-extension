@@ -141,17 +141,41 @@ npx addons-linter dist-firefox      # want: 0 errors, 0 warnings, 0 notices
 `browser_specific_settings`. Do not change it after the first submission; it is the
 identity users' installs are tied to.
 
-**Source code submission is required.** AMO requires it whenever the uploaded files
-were produced by a build step, which ours are (esbuild). Provide the repo and
-build instructions:
+**Source code submission is required.** AMO asks whether you use "code generators,
+minifiers, tools that combine multiple files, template engines, or any other tool
+that processes code into files included in the extension". **The answer is yes** —
+esbuild transpiles the TypeScript in `src/` and bundles each entry point into one
+file, and `build.mjs` generates a per-target `manifest.json`.
+
+Upload `dripd-firefox-1.0.0-source.zip` and paste these build instructions:
 
 > Source: https://github.com/dripd-dk/dripd-app-photo-extension
-> Build: `npm ci && npm run build:firefox` — output in `dist-firefox/`
-> Node 20+. The build is not minified; the uploaded files are byte-comparable to
-> the build output.
+>
+> Build:
+>   1. npm ci
+>   2. npm run build:firefox
+>   3. The add-on is the contents of dist-firefox/
+>
+> Verified with Node 26.4.0 and npm 11.17.0 on macOS. The only build tool is
+> esbuild (TypeScript -> JavaScript, one bundle per entry point). No minifier, no
+> obfuscator, no template engine. build.mjs also copies static assets and strips
+> the Chromium-only manifest keys.
+>
+> The build is deterministic: `npm ci && npm run build:firefox` from this archive
+> produces output byte-for-byte identical to the uploaded package, so it can be
+> diffed directly.
+
+That last claim is worth keeping true — **verify it before every submission**:
+
+```bash
+cd /tmp && rm -rf reprocheck && mkdir reprocheck && cd reprocheck
+unzip -q /path/to/dripd-firefox-<version>-source.zip
+npm ci && npm run build:firefox
+diff -r dist-firefox /path/to/dripd-capture/dist-firefox    # expect no output
+```
 
 Not minifying was deliberate and it pays off here: a reviewer can diff the upload
-against a local build directly.
+against their own build directly, and the diff is empty.
 
 ---
 
