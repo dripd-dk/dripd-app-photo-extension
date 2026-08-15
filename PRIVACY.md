@@ -62,4 +62,4 @@ dripd keeps working; you upload images by hand instead.
 
 ## Contact
 
-privacy@dripd.dk
+kontakt@dripd.dk

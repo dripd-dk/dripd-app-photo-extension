@@ -162,7 +162,7 @@ OPEN SOURCE
 Hele udvidelsen er offentlig under MIT-licens, og koden er ikke minificeret, så alt ovenstående kan kontrolleres: https://github.com/dripd-dk/dripd-app-photo-extension
 
 KONTAKT
-privacy@dripd.dk
+kontakt@dripd.dk
 Denne tekst findes også på https://dripd.dk/udvidelsen/privatliv
 ```
 
@@ -197,7 +197,7 @@ OPEN SOURCE
 The whole extension is public under the MIT licence, and the code is not minified, so everything above can be checked against it: https://github.com/dripd-dk/dripd-app-photo-extension
 
 CONTACT
-privacy@dripd.dk
+kontakt@dripd.dk
 This text is also at https://dripd.dk/udvidelsen/privatliv
 ```
 
