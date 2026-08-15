@@ -74,6 +74,8 @@ const KEEPALIVE_MS = 20_000
 export interface TabInfo {
   id?: number
   status?: string
+  /** Needs the `tabs` permission, which we have. Only ever read for diagnostics. */
+  url?: string
 }
 
 export interface WindowInfo {
@@ -339,10 +341,14 @@ export function createRouter(deps: RouterDeps): Router {
       () => api.windows.create({ url, type: 'popup', width: POPUP_WIDTH, height: POPUP_HEIGHT }),
     ]
 
-    for (const attempt of attempts) {
+    for (let i = 0; i < attempts.length; i++) {
       try {
-        const win = await attempt()
+        const win = await attempts[i]!()
         const tabId = win?.tabs?.[0]?.id
+        // Which attempt won, and which tab we were handed. A popup showing the
+        // wrong page is either the wrong URL requested or the right URL into
+        // somebody else's tab, and only the tab id tells those apart.
+        log('windows.create', { attempt: i, windowId: win?.id, tabId, tabCount: win?.tabs?.length })
         if (win?.id != null && tabId != null) return { windowId: win.id, tabId }
       } catch (e) {
         log('windows.create failed', e)
@@ -442,6 +448,15 @@ export function createRouter(deps: RouterDeps): Router {
     try {
       await waitForLoad(opened.tabId)
       await wait(settleMs)
+      // What that tab is ACTUALLY showing before we inject into it. If this is
+      // not the retailer, everything downstream is aimed at the wrong page and
+      // the viewfinder lands somewhere nobody wanted it.
+      try {
+        const tab = await api.tabs.get(opened.tabId)
+        log('tab before inject', { tabId: opened.tabId, url: tab?.url, status: tab?.status })
+      } catch (e) {
+        log('could not read tab before inject', e)
+      }
       await api.scripting.executeScript({
         target: { tabId: opened.tabId },
         files: ['injected.js'],
