@@ -77,6 +77,10 @@ if (target === 'chrome') {
 
 await writeFile(resolve(outdir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 await cp(resolve(root, 'src/onboarding.html'), resolve(outdir, 'onboarding.html'))
+// Self-hosted so the grant page renders in dripd's own serif rather than a
+// Georgia fallback. Bundled rather than fetched: a store reviewer reading this
+// manifest should find no network access at all, and there is none.
+await cp(resolve(root, 'src/fonts'), resolve(outdir, 'fonts'), { recursive: true })
 
 const matches = manifest.content_scripts[0].matches.join(', ')
 console.log(`built ${target}${dev ? ' (dev)' : ''} → ${outdir}`)

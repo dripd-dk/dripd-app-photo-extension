@@ -3,3 +3,4 @@ dist/
 dist-dev/
 dist-firefox/
 *.zip
+.DS_Store

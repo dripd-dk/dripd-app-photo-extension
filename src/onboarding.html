@@ -4,93 +4,193 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>dripd</title>
+    <!--
+      Frame 29 of "dripd Platform.dc.html" — "Udvidelsens egen installationsside".
+      The design is a fixed 640px card; a real page has to survive any window, so
+      it becomes a centred 640px column with the card's padding intact.
+
+      Light only, deliberately. The design is the warm paper palette and has no
+      dark variant; an inverted one would be invention, not implementation.
+    -->
     <style>
-      :root {
-        color-scheme: light dark;
-        --bg: #ffffff;
-        --fg: #111111;
-        --muted: #5b5b5b;
-        --line: #e4e4e4;
-        --accent: #111111;
-        --accent-fg: #ffffff;
-        --ok: #0f7b4f;
+      @font-face {
+        font-family: 'Instrument Serif';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('fonts/instrument-serif-regular.woff2') format('woff2');
       }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #101010;
-          --fg: #f4f4f4;
-          --muted: #a6a6a6;
-          --line: #2a2a2a;
-          --accent: #f4f4f4;
-          --accent-fg: #101010;
-          --ok: #4ec98b;
-        }
+      /* The wordmark is specified italic 600. Only a 400 italic face exists — the
+         app has the same gap and renders it faux-bold, so matching that is what
+         keeps the two consistent. */
+      @font-face {
+        font-family: 'Instrument Serif';
+        font-style: italic;
+        font-weight: 400;
+        font-display: swap;
+        src: url('fonts/instrument-serif-italic.woff2') format('woff2');
+      }
+
+      :root {
+        color-scheme: light;
+        --paper: #fdfcfa;
+        --card: #ffffff;
+        --ink: #191714;
+        --muted: #5c574e;
+        --faint: #8a8377;
+        --line: #eae6df;
+        --brand: #059669;
+        --serif: 'Instrument Serif', Georgia, 'Times New Roman', serif;
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        background: var(--bg);
-        color: var(--fg);
-        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        background: var(--paper);
+        color: var(--ink);
+        font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
         display: flex;
         justify-content: center;
-        padding: 48px 20px;
       }
-      main { width: 100%; max-width: 34rem; }
-      h1 { font-size: 1.5rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; }
-      p.lead { color: var(--muted); margin: 0 0 2rem; }
-      ul { padding-left: 1.1rem; margin: 0 0 2rem; }
-      li { margin-bottom: 0.5rem; }
-      li b { font-weight: 600; }
-      button {
-        font: inherit;
-        font-weight: 600;
-        padding: 0.8rem 1.4rem;
+      main {
+        width: 100%;
+        max-width: 640px;
+        padding: 64px 56px 52px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 28px;
+        text-align: center;
+      }
+      .wordmark {
+        font: italic 600 30px var(--serif);
+        letter-spacing: -0.5px;
+      }
+      .wordmark span { color: var(--brand); }
+
+      .lede { display: flex; flex-direction: column; gap: 10px; }
+      h1 {
+        font: 400 32px/1.15 var(--serif);
+        margin: 0;
+        letter-spacing: -0.5px;
+      }
+      .lede p {
+        margin: 0;
+        max-width: 380px;
+        color: var(--muted);
+      }
+
+      .promises {
+        align-self: stretch;
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        padding: 26px 28px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+      }
+      .promises div { display: flex; gap: 12px; align-items: baseline; }
+      .promises .tick { flex: none; color: var(--brand); font-weight: 700; }
+      .promises span:last-child { color: var(--muted); }
+      .promises strong { color: var(--ink); font-weight: 600; }
+
+      .actions {
+        align-self: stretch;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+      }
+      #grant {
+        align-self: stretch;
+        padding: 15px 0;
         border: 0;
-        border-radius: 10px;
-        background: var(--accent);
-        color: var(--accent-fg);
+        border-radius: 100px;
+        background: var(--brand);
+        color: #fff;
+        font: inherit;
+        font-size: 15px;
+        font-weight: 600;
+        text-align: center;
         cursor: pointer;
       }
-      button:disabled { opacity: 0.5; cursor: default; }
-      .status { margin-top: 1.25rem; font-weight: 600; min-height: 1.6rem; }
-      .status[data-state="granted"] { color: var(--ok); }
-      footer {
-        margin-top: 2.5rem;
-        padding-top: 1.25rem;
-        border-top: 1px solid var(--line);
+      #grant:disabled { background: #cfd8d4; color: #6f7a75; cursor: default; }
+      /* Undecorated, matching the design's own `a { text-decoration: none }`. */
+      .decline {
+        border: 0;
+        background: none;
+        padding: 0;
+        font: inherit;
+        font-size: 13px;
+        color: var(--faint);
+        cursor: pointer;
+      }
+      .decline:hover { text-decoration: underline; }
+
+      /* Not in the design: the page has to say what happened after the browser's
+         own prompt, which the static frame has no state for. Sized as the footnote
+         so it reads as a status line rather than a second heading. */
+      .status {
+        min-height: 1.6em;
+        font-size: 12.5px;
         color: var(--muted);
-        font-size: 0.875rem;
+      }
+      .status[data-state='granted'] { color: var(--brand); font-weight: 600; }
+
+      .footnote { font-size: 11.5px; color: var(--faint); }
+
+      @media (max-width: 520px) {
+        main { padding: 40px 22px 36px; }
+        h1 { font-size: 27px; }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>Giv dripd adgang til at hente billeder</h1>
-      <p class="lead">
-        Det sker én gang. Din browser vil spørge, om dripd må læse sider på websteder —
-        her er præcis hvad det bruges til.
-      </p>
+      <div class="wordmark">dripd<span>.</span></div>
 
-      <ul>
-        <li>
-          Når du selv indsætter et link i dripd-studiet, åbner vi butikkens side kort i et
-          lille vindue og læser <b>billed-adresserne</b> derfra.
-        </li>
-        <li>
-          Billedet du vælger, hentes i <b>din egen browser</b> — det er derfor det virker på
-          butikker, der blokerer servere.
-        </li>
-        <li><b>Intet gemmes</b> af udvidelsen. Ingen historik, ingen baggrundsaktivitet.</li>
-        <li>Der sker <b>ingenting</b>, før du beder om det på dripd.</li>
-      </ul>
+      <div class="lede">
+        <h1>Før du giver tilladelse</h1>
+        <p>
+          Udvidelsen gør én ting: henter billeder fra links, du selv indsætter, så du kan
+          bygge fits nemmere.
+        </p>
+      </div>
 
-      <button id="grant" type="button">Giv adgang</button>
+      <div class="promises">
+        <div>
+          <span class="tick">✓</span>
+          <span>Henter <strong>kun billeder</strong> fra de links, du selv indsætter</span>
+        </div>
+        <div>
+          <span class="tick">✓</span>
+          <span>Henter, gemmer eller ændrer <strong>aldrig personlige data</strong></span>
+        </div>
+        <div>
+          <span class="tick">✓</span>
+          <span>Ingen tracking, ingen annoncer, ingen cookies</span>
+        </div>
+        <!-- The design links "GitHub" here. The repository is not public yet, so
+             there is no URL to link and inventing one would be a false claim on a
+             privacy page. Restore the link when the repo is published. -->
+        <div>
+          <span class="tick">✓</span>
+          <span><strong>Open source</strong> — koden kan auditeres på GitHub</span>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="grant" type="button">Giv tilladelse</button>
+        <button id="decline" class="decline" type="button">Nej tak — fjern udvidelsen</button>
+      </div>
+
       <div class="status" id="status" role="status"></div>
 
-      <footer>
-        Du kan altid trække adgangen tilbage i din browsers indstillinger for udvidelser.
-      </footer>
+      <div class="footnote">
+        Du kan slå udvidelsen fra eller fjerne den når som helst i Chrome.
+      </div>
     </main>
     <script src="onboarding.js"></script>
   </body>

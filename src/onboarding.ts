@@ -10,6 +10,7 @@ import { api } from './browser'
 import { hasHostAccess, requestHostAccess } from './permissions'
 
 const button = document.getElementById('grant') as HTMLButtonElement | null
+const decline = document.getElementById('decline') as HTMLButtonElement | null
 const status = document.getElementById('status')
 
 function show(text: string, state?: 'granted'): void {
@@ -36,6 +37,31 @@ button?.addEventListener('click', async () => {
   const granted = await requestHostAccess(api)
   if (granted) markGranted()
   else show('Adgang blev ikke givet. Tryk igen, hvis du vil bruge billed-hentning.')
+})
+
+/**
+ * "Nej tak — fjern udvidelsen", taken literally.
+ *
+ * `management.uninstallSelf` is available to every extension without declaring
+ * the `management` permission, precisely because it can only ever remove the
+ * caller. `showConfirmDialog` leaves the actual decision with the browser's own
+ * prompt rather than this page, so the button cannot uninstall anything by
+ * itself. Where it does not exist, closing the tab is the honest fallback — the
+ * footnote already says removal lives in Chrome's own settings.
+ */
+decline?.addEventListener('click', async () => {
+  const management = (api as { management?: { uninstallSelf?: (o: unknown) => Promise<void> } })
+    .management
+  try {
+    if (management?.uninstallSelf) {
+      await management.uninstallSelf({ showConfirmDialog: true })
+      return
+    }
+  } catch {
+    /* the user said no in the browser's dialog — leave the page as it was */
+    return
+  }
+  show('Du kan fjerne udvidelsen under Udvidelser i din browser.')
 })
 
 void init()
