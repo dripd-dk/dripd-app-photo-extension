@@ -1,6 +1,6 @@
 {
   "name": "dripd-capture",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Browser extension that lets dripd.dk read product images from a retailer page in the user's own browser.",
   "license": "MIT",
   "repository": {

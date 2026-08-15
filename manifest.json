@@ -1,18 +1,31 @@
 {
   "manifest_version": 3,
   "name": "dripd",
-  "version": "0.1.0",
-  "description": "Henter produktbilleder fra en butiks side, når du selv beder om det på dripd. Intet gemmes.",
-  "permissions": ["scripting", "tabs"],
-  "optional_host_permissions": ["https://*/*"],
+  "version": "1.0.0",
+  "description": "Henter produktbilleder fra en butiks side, n\u00e5r du selv beder om det p\u00e5 dripd. Intet gemmes.",
+  "homepage_url": "https://github.com/dripd-dk/dripd-app-photo-extension",
+  "permissions": [
+    "scripting",
+    "tabs"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
   "background": {
     "service_worker": "sw.js",
-    "scripts": ["sw.js"]
+    "scripts": [
+      "sw.js"
+    ]
   },
   "content_scripts": [
     {
-      "matches": ["https://dripd.dk/*", "https://www.dripd.dk/*"],
-      "js": ["bridge.js"],
+      "matches": [
+        "https://dripd.dk/*",
+        "https://www.dripd.dk/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
       "run_at": "document_start"
     }
   ],
@@ -31,6 +44,9 @@
     }
   },
   "browser_specific_settings": {
-    "gecko": { "id": "capture@dripd.dk", "strict_min_version": "121.0" }
+    "gecko": {
+      "id": "capture@dripd.dk",
+      "strict_min_version": "121.0"
+    }
   }
 }

@@ -149,7 +149,8 @@ hear about it.
 
 ## Install
 
-Not in the browser stores yet. To run it now, build it and load it unpacked:
+Not in the browser stores yet — see [`docs/PUBLISHING.md`](docs/PUBLISHING.md) for
+what that takes. To run it now, build it and load it unpacked:
 
 ```bash
 npm install
@@ -171,10 +172,15 @@ app. See [`docs/SAFARI.md`](docs/SAFARI.md).
 
 | Browser | State |
 |---|---|
-| Chrome | Works |
-| Edge, Brave, Opera, Arc, Vivaldi | Same engine as Chrome; should work, not yet tested |
-| Firefox | Builds and loads. Not yet tested in earnest |
-| Safari | Wrapper app builds; nothing beyond that verified — see [`docs/SAFARI.md`](docs/SAFARI.md) |
+| Chrome | **Verified** — full capture, end to end |
+| Firefox | **Verified** — full capture, end to end |
+| Safari | **Verified** — full capture, end to end. Setup: [`docs/SAFARI.md`](docs/SAFARI.md) |
+| Edge, Brave, Opera, Arc, Vivaldi | Same engine and same build as Chrome; not separately tested |
+
+Each of the three took its own fix, and none of them were cosmetic — a Firefox
+build that could not be granted access to a dev server, a Safari `windows.create`
+that answers without the tab it just made. Details in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Firefox needs its own build because it can't use Chrome's background service worker
 ([bug 1573659](https://bugzilla.mozilla.org/show_bug.cgi?id=1573659)). One manifest

@@ -123,13 +123,19 @@ than only in the project file.
   and the extension's popup-window flow almost certainly does not translate to iOS
   Safari — there are no extension-opened popup windows there. Treat the iOS target
   as scaffolding, not a plan.
-- **Behaviour.** The macOS app compiles. Nothing beyond that has been verified: no
-  capture has ever been run in Safari.
 
-## Known risks specific to Safari
+## Behaviour: verified
 
-- `optional_host_permissions` and the grant flow behave differently, and the
-  permission page is the first thing likely to break.
-- `windows.create({ type: 'popup' })` is supported but its focus and sizing
-  behaviour differ; the code already falls back to a plain popup, then a tab.
-- Safari has no `browser.identity`, which is why nothing here uses it.
+A full capture works in Safari 26 on macOS 26 — framing, grabbing, and the byte
+fetch. Three Safari-specific things had to change to get there, all documented in
+[`ARCHITECTURE.md`](ARCHITECTURE.md):
+
+- `windows.create` resolves **without a `tabs` array**, which made the router open
+  two popups and inject into neither.
+- Host access is granted in **Safari → Settings → Extensions**, per site.
+  `permissions.request()` shows no prompt, so the grant page shows steps instead
+  and polls for the result.
+- The toolbar button opens the grant page, because permission gates the content
+  script and the content script is what lets the studio ask for permission.
+
+Safari has no `browser.identity`, which is why nothing here uses it.

@@ -154,12 +154,38 @@ What tests cannot cover is the thing most likely to break: whether an
 extension-driven popup on a bot-managed product page behaves like a hand-typed
 navigation. Only a warm consumer profile finds that out, by hand, per retailer.
 
-## Not verified yet
+## What each browser needed
 
-- **Firefox.** `npm run build:firefox` produces a loadable add-on. Its
-  `optional_host_permissions` grant flow — the whole permission page — is the first
-  thing likely to differ.
-- **Safari.** Needs a native wrapper; see `safari/`. The code avoids
-  `browser.identity` (Safari has none) precisely so this stays possible.
-- **Popup behaviour outside Chromium.** The window is created `focused: true`,
-  falling back to a plain popup, then to an active tab.
+All three run the full capture. Getting there took a specific fix per engine, and
+they are worth knowing before changing anything in this area.
+
+**Firefox** makes every host permission opt-in, including the ones implied by
+`content_scripts.matches`. Chrome injects a declared content script without
+asking; Firefox does not run it until its site is granted. The production grant
+(`https://*/*`) cannot cover an http dev server, so the dev build declares the
+localhost origins as optional host permissions — otherwise there is nothing in the
+permissions UI to switch on and the bridge silently never exists. Firefox also
+registers content scripts at extension-load time: granting a host afterwards needs
+an extension reload before it takes effect.
+
+**Safari** differs in two ways that both looked like our bugs:
+
+- `windows.create` resolves **without the documented `tabs` array**. Reading that
+  absence as failure abandoned a good window and opened another, then fell through
+  to a tab — two popups, and the injection landing somewhere that was never the
+  retailer's page. `tabs.query({windowId})` is the authority; `create` is not.
+- Host access is granted in Safari's own Settings, per site. `permissions.request()`
+  produces no prompt, so the grant page must show instructions rather than a button
+  and watch for the grant instead of asking for it. That also creates a dead end —
+  permission gates the content script, the content script is how the studio sees
+  the extension, and the studio is what opens the grant page — which is why the
+  toolbar button opens it.
+
+**Chrome** needed none of this, which is exactly why testing on it alone proves
+very little.
+
+## Still unverified
+
+- **Edge, Brave, Opera, Arc, Vivaldi.** Same engine, same build as Chrome.
+- **iOS Safari.** The converter emits an iOS target; the popup-window flow almost
+  certainly does not translate, since iOS Safari has no extension-opened windows.
