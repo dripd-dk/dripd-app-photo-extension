@@ -1,11 +1,16 @@
 # dripd-capture
 
 The browser extension that lets the dripd studio read product images from a
-retailer's page. It is a **pipe, not a feature**: every bit of UX lives in
-dripd-app, and this side does the two things a web page cannot.
+retailer's page. It does the three things a web page cannot:
 
-1. Open a retailer page in a real browser and read the image URLs off its DOM.
-2. Fetch the chosen image's bytes with the user's own session and IP.
+1. Open a retailer page in a real browser.
+2. Let the user point at the photo they want, on that page, and read its URL off
+   the DOM at that moment.
+3. Fetch the chosen image's bytes with the user's own session and IP.
+
+Step 2 is the only UX that lives here rather than in dripd-app, and it has to:
+the page being framed is the retailer's, and nothing on dripd.dk can draw on it
+or read what is under the frame.
 
 That second one is the whole reason this exists. `image.hm.com` answers a
 residential browser with 200, a datacenter IP with 403, and a page-context
@@ -37,8 +42,10 @@ Then, in Chrome:
 3. The first capture opens a dripd tab asking for host access. Press **Giv
    adgang** and accept your browser's prompt, then press **Hent billeder** again.
 
-Expect: a small popup window opens on the retailer's page, works for a couple of
-seconds, and closes itself. The picker fills with candidates.
+Expect: a popup window opens on the retailer's page with a viewfinder over it.
+**Nothing is collected yet.** Scroll the page until the photo you want sits inside
+the frame, press **Hent billeder** in that window, and the studio's picker fills
+with the framed photo first.
 
 There is **no permission prompt at install time** — `https://*/*` is declared
 `optional_host_permissions`, so the ask arrives later, in context, from the
@@ -48,22 +55,28 @@ prompted; it does not.)
 ### Watching it work
 
 `chrome://extensions` → dripd → **service worker** opens the background console.
-Every capture logs one line:
+A capture logs two lines — one when the viewfinder goes up, one when the user
+presses the button:
 
 ```
-[dripd] harvest 3f1c… 41 images { consentDismissed: true, advances: 5, strategies: [ 'thumbnail' ], gained: 3 }
+[dripd] framing 3f1c… https://www2.hm.com/da_dk/productpage.1358428002.html
+[dripd] harvest 3f1c… 41 images { version: 2, consentDismissed: true, framed: true, framedMatches: 2 }
 ```
 
-- `advances` — how many times it nudged the gallery.
-- `strategies` — which generic handle actually drove it: `thumbnail`,
-  `next-button`, or `arrow-key`. Empty means none worked and you got the
-  fresh-load harvest.
-- `gained` — distinct photos found *because* of advancing.
+- `framed` — was there an image inside the cutout at all? `false` means the user
+  pressed the button with an empty frame; they still get a ranked picker.
+- `framedMatches` — how many harvest rows the framed element accounted for. One
+  `<img>` contributes its `currentSrc`, `src` and widest `srcset` rendition, so
+  1–3 is normal.
 
-`gained: 0` with a non-empty `strategies` is contradictory and worth reporting.
-`strategies: []` on a carousel you can click by hand is the interesting bug.
+`framed: true` with `framedMatches: 0` is contradictory and worth reporting: the
+viewfinder found an `<img>` that `collect` did not record, which silently drops
+the user's choice back to plain server ranking.
 
-## Why it advances the gallery
+A `framing` line with no `harvest` line after it is a session the user closed,
+cancelled, or walked away from — all three are normal.
+
+## Why the user frames it
 
 Measured on a real H&M PDP in a warm consumer Chrome, 2026-08-14:
 
@@ -73,24 +86,33 @@ Measured on a real H&M PDP in a warm consumer Chrome, 2026-08-14:
 | after browsing the carousel | 6 | 1 | 9 |
 | after a full-page scroll | **3 — unchanged** | 2 | 9 |
 
-The gallery is a Splide carousel whose slides load on *interaction*. Scrolling —
-which is what the mobile flow does — adds **zero** gallery photos here and drags
-in nine related-product cards that no size or URL heuristic can tell apart from
-product photos. So this never scrolls; it advances instead, and unions each
-harvest into the running set.
+The gallery is a Splide carousel whose slides load on *interaction*, so a page
+this extension merely opens shows three of six photos. Scrolling adds **zero**
+and drags in nine related-product cards that no size or URL heuristic tells apart
+from product photos.
 
-A thumbnail is not a dead end either: rewriting its `imwidth` to 2160 returns a
-genuine 2160×3240 image. That is why a fresh harvest already reaches 5 of 6
-photos before any advancing happens.
+An earlier version answered that by driving the carousel itself — generic
+thumbnail clicks, next-buttons, arrow keys — and unioning each harvest. It worked
+on H&M and was still the wrong shape: on a page where the thumbnail strip and the
+related-products rail are indistinguishable to a generic selector, the garment the
+user actually wants is one tile among thirty, and the extension is guessing which.
 
-**Bounded on purpose:** eight advances or four seconds, then it returns whatever
-it has. A carousel that ignores every handle degrades to the fresh-load result.
-It must never hang — a hang is a 45 s bridge timeout and a dead studio.
+So the person who knows says so. The popup opens with a viewfinder over the page,
+they scroll the photo into it, and `collect` runs on their button press and not
+before. The carousel gets advanced by the user, which is the one mechanism that
+was never going to break on the next retailer.
 
-**It never clicks a link.** A thumbnail strip and a related-products rail look
-identical to a generic selector, and following one would silently capture a
-different garment. Anything under an `<a href>` is excluded, including images
-inside one, because a click on an image bubbles to the anchor.
+A thumbnail in the frame is not a dead end: rewriting its `imwidth` to 2160
+returns a genuine 2160×3240 image, so framing a 116px thumb still captures the
+full-resolution photograph.
+
+**The framed photo is ranked first, not auto-captured.** Framing is aim, not
+confirmation — a grab that caught the neighbouring tile has to stay one click from
+recovery, so the picker still opens with every candidate behind the framed one.
+
+**It never clicks anything on the page.** The overlay is `pointer-events: none`
+except its own button bar, so scrolling and dragging reach the retailer's page
+underneath, and the extension itself never follows a link.
 
 ## Layout
 
@@ -103,17 +125,26 @@ inside one, because a click on an image bubbles to the anchor.
 | `src/bridge.content.ts` | Content-script wiring |
 | `src/injected/collect.ts` | Read images and metadata off a DOM |
 | `src/injected/consent.ts` | Reject a cookie wall. Never accepts |
-| `src/injected/gallery.ts` | Advance the carousel generically, union the results |
+| `src/injected/frame.ts` | The viewfinder, and what counts as framed |
 | `src/injected/index.ts` | Installs `__dripdHarvest` in the isolated world |
 | `src/permissions.ts` + `onboarding.*` | The one-time host grant |
 
-Three verbs, and the middle one is where the design earns its keep:
+Three verbs the page can call, and a fourth it cannot:
 
 | Verb | Meaning |
 |---|---|
-| `harvest(url)` | Opens the popup, collects, and **leaves it open** |
+| `harvest(url)` | Opens the popup, **waits for the user to frame a photo**, leaves it open |
 | `fetchBytes(sessionId, url)` | Fetches in that session; **extends its TTL** |
 | `resolve(sessionId, action)` | **Window only:** closes or surfaces it |
+| `framed(sessionId, …)` | Sent by the overlay, not the page. Settles `harvest` |
+
+`harvest` is the one that changed shape. It used to answer in seconds; it now
+parks on a human and can stay pending for minutes. Three things end that wait —
+the frame timeout (5 min), the tab being closed, and the Annullér button — and all
+three reject rather than hang, because a hang upstream is a studio stuck on a
+spinner. The page side allows six minutes for this verb alone, deliberately above
+the extension's own ceiling so the specific reason arrives before a generic
+timeout does.
 
 `resolve` closes the *window*, not the *session*. The page ranks the harvest
 server-side and resolves at that point — before the user has picked anything — so
@@ -152,16 +183,23 @@ adding a `storage` permission for state that is worthless after a restart.
 npm test
 ```
 
-68 tests, ~2.5 s, no browser. `npm test` builds first so the bundle test cannot
+80 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot
 run against a stale `dist/`.
 
-- `collect` / `consent` / `key` / `gallery` — pure functions over a happy-dom DOM.
+- `collect` / `consent` / `key` / `frame` — pure functions over a happy-dom DOM.
+  The `frame` tests feed rects in through a `data-rect` attribute, because
+  happy-dom does no layout: every element reports 0×0, so a selection test
+  written against real geometry passes without deciding anything.
 - `router` — the full session lifecycle against a faked extension API: the window
   stays open after `harvest`, `dismiss` closes it, `surface` focuses it, and
   **`fetchBytes` still works after either** (the test that stops someone
   "fixing" resolve into a session teardown). Plus TTL expiry dismissing an open
   window, re-arming on fetch, the popup→tab fallback chain, and every rejection
   path.
+- `router`, framing — that nothing is collected before the button is pressed, and
+  that all three endings (closed tab, Annullér, timeout) reject, close the window
+  and leave no session or pending promise behind. The fake presses the button
+  from inside `executeScript`, which is where a real user would.
 - `bridge` — the origin, source and direction checks against a **real** window.
   Note the fidelity gap called out in that file: happy-dom does not populate
   `MessageEvent.source`, so inbound requests are dispatched explicitly. Without

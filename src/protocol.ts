@@ -19,7 +19,7 @@
 
 export const MARKER = '__dripd' as const
 
-export type Kind = 'ping' | 'harvest' | 'fetchBytes' | 'resolve'
+export type Kind = 'ping' | 'harvest' | 'fetchBytes' | 'resolve' | 'framed'
 export type ResolveAction = 'dismiss' | 'surface'
 
 export interface RawImage {
@@ -27,6 +27,12 @@ export interface RawImage {
   w: number
   h: number
   inViewport?: boolean
+  /** This is the image the user put inside the cutout. Every URL belonging to
+   *  that one `<img>` carries the flag, because `collect` records an element's
+   *  `currentSrc`, `src` and best `srcset` rendition as separate entries and the
+   *  server may rank any of them. The page uses it to float the user's own
+   *  choice to the front of the picker. */
+  framed?: boolean
 }
 
 export interface RawHarvest {
@@ -54,8 +60,20 @@ export interface ResolveReq {
   sessionId: string
   action: ResolveAction
 }
+/**
+ * Sent by the injected overlay — not by the page — when the user presses "Hent
+ * billeder" or cancels. It is what makes `harvest` resolve, so it travels the
+ * same `runtime.sendMessage` path as everything else and carries its session id
+ * rather than relying on the sender's tab.
+ */
+export interface FramedReq {
+  kind: 'framed'
+  sessionId: string
+  harvest?: RawHarvest
+  cancelled?: boolean
+}
 
-export type Req = PingReq | HarvestReq | FetchBytesReq | ResolveReq
+export type Req = PingReq | HarvestReq | FetchBytesReq | ResolveReq | FramedReq
 
 export type Reply =
   | { ok: true; [k: string]: unknown }
@@ -72,6 +90,11 @@ export const ERR = {
   fetchFailed: 'fetch_failed',
   tooLarge: 'too_large',
   unknownKind: 'unknown_kind',
+  /** The user closed the popup, or pressed Annullér, before framing anything. */
+  windowClosed: 'window_closed',
+  /** Nobody pressed the button. Not a failure of the extension, and the copy
+   *  must not read like one. */
+  frameTimeout: 'frame_timeout',
 } as const
 
 /** Only https, and only a real absolute URL. The background never fetches or

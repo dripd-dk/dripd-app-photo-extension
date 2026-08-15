@@ -47,12 +47,17 @@ interface FakeOptions {
   harvestResult?: unknown
   windowCreateFailures?: number
   executeScriptError?: string
+  /** Leave the viewfinder up instead of pressing the button, so a test can drive
+   *  the ways a framing session ends without one. */
+  autoFrame?: boolean
 }
 
 function fakeApi(opts: FakeOptions = {}) {
   const granted = opts.granted ?? true
   let windowFailures = opts.windowCreateFailures ?? 0
   let nextId = 100
+  const closeListeners: ((tabId: number) => void)[] = []
+  let onArm: ((sessionId: string) => void) | null = null
 
   const log = {
     windowsCreated: [] as Record<string, unknown>[],
@@ -61,6 +66,8 @@ function fakeApi(opts: FakeOptions = {}) {
     tabsCreated: [] as Record<string, unknown>[],
     tabsRemoved: [] as number[],
     scripts: [] as Record<string, unknown>[],
+    /** Whatever the popup ended up being, window or fallback tab. */
+    tabIds: [] as number[],
   }
 
   const api: BrowserLike = {
@@ -74,7 +81,9 @@ function fakeApi(opts: FakeOptions = {}) {
           return Promise.reject(new Error('popups not allowed'))
         }
         const id = nextId++
-        return Promise.resolve({ id, tabs: [{ id: nextId++ }] })
+        const tabId = nextId++
+        log.tabIds.push(tabId)
+        return Promise.resolve({ id, tabs: [{ id: tabId }] })
       },
       remove(id) {
         log.windowsRemoved.push(id)
@@ -88,7 +97,10 @@ function fakeApi(opts: FakeOptions = {}) {
     tabs: {
       create(options) {
         log.tabsCreated.push(options)
-        return Promise.resolve({ id: nextId++ })
+        const id = nextId++
+        // The onboarding tab is not a popup; only the fallback path is.
+        if (options.active === false) log.tabIds.push(id)
+        return Promise.resolve({ id })
       },
       get: () => Promise.resolve({ status: 'complete' }),
       remove(id) {
@@ -96,19 +108,31 @@ function fakeApi(opts: FakeOptions = {}) {
         return Promise.resolve()
       },
       onUpdated: { addListener: () => {}, removeListener: () => {} },
+      onRemoved: { addListener: (fn) => closeListeners.push(fn) },
     },
     scripting: {
       executeScript(options) {
         log.scripts.push(options)
         if (opts.executeScriptError) return Promise.reject(new Error(opts.executeScriptError))
-        // The `files` injection returns nothing; the `func` call returns the harvest.
-        if (options.files) return Promise.resolve([{}])
-        return Promise.resolve([{ result: opts.harvestResult ?? HARVEST }])
+        // Arming carries the session id in `args`; that is the call a real user
+        // would answer by pressing the button, so it is where the fake presses it.
+        const args = options.args as unknown[] | undefined
+        const sessionId = typeof args?.[0] === 'string' ? args[0] : null
+        if (sessionId) queueMicrotask(() => onArm?.(sessionId))
+        return Promise.resolve([{}])
       },
     },
   }
 
-  return { api, log }
+  return {
+    api,
+    log,
+    /** The user closing the popup. */
+    closeTab: (tabId: number) => closeListeners.forEach((fn) => fn(tabId)),
+    setOnArm: (fn: (sessionId: string) => void) => {
+      onArm = fn
+    },
+  }
 }
 
 function fakeFetch(body: Uint8Array, init: { ok?: boolean; status?: number; type?: string } = {}) {
@@ -124,7 +148,7 @@ function fakeFetch(body: Uint8Array, init: { ok?: boolean; status?: number; type
 
 function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
   const timers = fakeTimers()
-  const { api, log } = fakeApi(opts)
+  const { api, log, closeTab, setOnArm } = fakeApi(opts)
   // Kept off the timer seam on purpose: a 20 s heartbeat sharing `schedule` would
   // show up in every TTL assertion in this file.
   const keepAlive: boolean[] = []
@@ -141,7 +165,32 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
     cancel: timers.cancel,
     keepAlive: (active) => keepAlive.push(active),
   })
-  return { router, log, timers, keepAlive }
+  // Most tests care about what happens once a photo has been framed, so the
+  // default fake presses the button the moment the viewfinder is armed.
+  if (opts.autoFrame !== false) {
+    setOnArm((sessionId) => {
+      void router.handle({
+        kind: 'framed',
+        sessionId,
+        harvest: opts.harvestResult ?? HARVEST,
+      })
+    })
+  }
+  return { router, log, timers, keepAlive, closeTab }
+}
+
+/**
+ * Wait until the router is genuinely parked on the user.
+ *
+ * Getting there crosses the load wait, the settle wait and two `executeScript`
+ * calls, all of which resolve as microtasks under `fakeTimers`. A fixed number of
+ * `await Promise.resolve()` hops is a guess about that chain's length — and a
+ * wrong guess does not fail, it hangs, because the framed message then arrives
+ * before anything is listening for it.
+ */
+async function untilFraming(router: Router): Promise<void> {
+  for (let i = 0; i < 500 && router.pendingCount() === 0; i++) await Promise.resolve()
+  if (router.pendingCount() === 0) throw new Error('never reached the framing state')
 }
 
 /** Harvest once and hand back the session id. Every session test starts here. */
@@ -178,26 +227,29 @@ describe('harvest', () => {
     expect(router.sessionCount()).toBe(1)
   })
 
-  it('injects the bundle first, then calls into it', async () => {
+  it('injects the bundle first, then arms it with the session id', async () => {
     const { router, log } = build()
     await router.handle({ kind: 'harvest', url: PDP })
 
     expect(log.scripts[0]).toMatchObject({ files: ['injected.js'] })
     expect(typeof log.scripts[1]!.func).toBe('function')
+    // The overlay names its own session when it reports back, rather than the
+    // background inferring one from the sender's tab.
+    expect(log.scripts[1]!.args).toEqual(['s1'])
   })
 
-  it('injects a runner that survives serialization', () => {
+  it('injects an arm call that survives serialization', () => {
     // The browser serializes `func` with toString(), so a reference to anything
     // outside the function body would arrive undefined. Re-evaluating the source
     // in a fresh scope is the same trip, and proves it.
     const { router, log } = build()
     return router.handle({ kind: 'harvest', url: PDP }).then(() => {
       const source = String(log.scripts[1]!.func)
-      const revived = new Function(`return (${source})`)() as () => unknown
+      const revived = new Function(`return (${source})`)() as (id: string) => unknown
       ;(globalThis as unknown as { __dripdHarvest: unknown }).__dripdHarvest = {
-        run: () => 'called',
+        arm: (id: string) => `armed:${id}`,
       }
-      expect(revived()).toBe('called')
+      expect(revived('s1')).toBe('armed:s1')
     })
   })
 
@@ -251,6 +303,92 @@ describe('harvest', () => {
     const reply = await router.handle({ kind: 'harvest', url: PDP })
     expect(reply).toMatchObject({ ok: false })
     expect(router.sessionCount()).toBe(0)
+    expect(router.pendingCount()).toBe(0)
+  })
+})
+
+describe('framing — the harvest waits for a human', () => {
+  it('collects nothing until the user presses the button', async () => {
+    const { router, log } = build({ autoFrame: false })
+
+    const inFlight = router.handle({ kind: 'harvest', url: PDP })
+    await untilFraming(router)
+
+    // The whole point of the change: the window is open, the viewfinder is up,
+    // and nothing has been collected or returned.
+    expect(router.pendingCount()).toBe(1)
+    expect(log.windowsCreated).toHaveLength(1)
+    let settled = false
+    void inFlight.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await router.handle({ kind: 'framed', sessionId: 's1', harvest: HARVEST })
+    await expect(inFlight).resolves.toMatchObject({ ok: true, sessionId: 's1', harvest: HARVEST })
+    expect(router.pendingCount()).toBe(0)
+  })
+
+  it('ends the session when the user closes the popup', async () => {
+    const { router, log, closeTab } = build({ autoFrame: false })
+
+    const inFlight = router.handle({ kind: 'harvest', url: PDP })
+    await untilFraming(router)
+    closeTab(log.tabIds[0]!)
+
+    // Travels as itself, not wrapped in inject_failed: the studio has its own
+    // copy for "you closed it", and that must not read like a crash.
+    await expect(inFlight).resolves.toEqual({ ok: false, error: 'window_closed' })
+    expect(router.sessionCount()).toBe(0)
+    expect(router.pendingCount()).toBe(0)
+  })
+
+  it('ends the session when the user presses Annullér', async () => {
+    const { router } = build({ autoFrame: false })
+
+    const inFlight = router.handle({ kind: 'harvest', url: PDP })
+    await untilFraming(router)
+    await router.handle({ kind: 'framed', sessionId: 's1', cancelled: true })
+
+    await expect(inFlight).resolves.toEqual({ ok: false, error: 'window_closed' })
+    expect(router.sessionCount()).toBe(0)
+  })
+
+  it('gives up if nobody ever presses the button', async () => {
+    const { router, log, timers } = build({ autoFrame: false })
+
+    const inFlight = router.handle({ kind: 'harvest', url: PDP })
+    await untilFraming(router)
+    timers.fireAll()
+
+    await expect(inFlight).resolves.toEqual({ ok: false, error: 'frame_timeout' })
+    // No leaked popup, which is the failure mode a minutes-long wait invites.
+    expect(log.windowsRemoved).toHaveLength(1)
+    expect(router.sessionCount()).toBe(0)
+    expect(router.pendingCount()).toBe(0)
+  })
+
+  it('shrugs off a second press after the studio already has its harvest', async () => {
+    // The overlay stays mounted on purpose so the user can re-frame, so a
+    // duplicate is a normal thing to see rather than an error.
+    const { router } = build()
+    const sessionId = await startSession(router)
+
+    await expect(
+      router.handle({ kind: 'framed', sessionId, harvest: HARVEST }),
+    ).resolves.toEqual({ ok: true })
+  })
+
+  it('holds the worker open while the user is still framing', async () => {
+    // A five-minute wait is many times MV3's ~30 s idle termination, and losing
+    // the worker mid-frame would strand both the popup and the studio.
+    const { router, keepAlive } = build({ autoFrame: false })
+    void router.handle({ kind: 'harvest', url: PDP })
+    await untilFraming(router)
+
+    expect(keepAlive.at(-1)).toBe(true)
+    expect(router.sessionCount()).toBe(1)
   })
 })
 
@@ -278,7 +416,7 @@ describe('resolve — the window, not the session', () => {
     expect(log.windowsRemoved).toEqual([])
     expect(log.windowsUpdated[0]?.opts).toMatchObject({ focused: true })
     const banner = String(log.scripts.at(-1)!.func)
-    expect(banner).toContain('afvis cookies')
+    expect(banner).toContain('Hent billeder')
   })
 
   it('is idempotent on a session that is already gone', async () => {

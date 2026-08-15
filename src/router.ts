@@ -9,9 +9,17 @@
  *
  * | Verb | Meaning |
  * |---|---|
- * | `harvest(url)` | Open the popup, collect, and **leave it open** |
+ * | `harvest(url)` | Open the popup, **wait for the user to frame a photo**, and leave it open |
  * | `fetchBytes(sessionId, url)` | Fetch in the background context; **extends the TTL** |
  * | `resolve(sessionId, action)` | **Window only:** close it, or bring it forward |
+ *
+ * `harvest` is the odd one: it does not resolve until a human presses a button in
+ * the popup, so it can legitimately stay pending for minutes. Three things bound
+ * it — a frame timeout, the tab being closed, and the Annullér button — and every
+ * one of them rejects rather than hanging, because a hang upstream is a dead
+ * studio with a spinner in it. The fourth verb, `framed`, is not part of the
+ * page's vocabulary at all: the injected overlay sends it, and it exists only to
+ * settle that promise.
  *
  * `resolve` closes the *window*; it does not end the *session*. The page ranks
  * the harvest server-side and resolves at that point — before the user has picked
@@ -45,6 +53,10 @@ import {
 
 const DEFAULT_TTL_MS = 60_000
 const DEFAULT_LOAD_TIMEOUT_MS = 20_000
+/** How long the viewfinder waits for a human. Generous on purpose — finding the
+ *  right photo on a slow retailer page is a minutes-long job, and the honest
+ *  end of a session the user walked away from is the closed tab, not this. */
+const DEFAULT_FRAME_TIMEOUT_MS = 5 * 60_000
 /** After `load` fires there is still layout and lazy-loading to come. */
 const DEFAULT_SETTLE_MS = 800
 const POPUP_WIDTH = 1280
@@ -86,6 +98,11 @@ export interface BrowserLike {
       addListener(fn: (tabId: number, info: { status?: string }) => void): void
       removeListener(fn: (tabId: number, info: { status?: string }) => void): void
     }
+    /** Closing a popup window removes its tab, so this covers both the window
+     *  and the background-tab fallback with one listener. */
+    onRemoved: {
+      addListener(fn: (tabId: number) => void): void
+    }
   }
   scripting: {
     executeScript(opts: Record<string, unknown>): Promise<{ result?: unknown }[]>
@@ -99,6 +116,7 @@ export interface RouterDeps {
   ttlMs?: number
   loadTimeoutMs?: number
   settleMs?: number
+  frameTimeoutMs?: number
   now?: () => number
   newId?: () => string
   schedule?: (fn: () => void, ms: number) => unknown
@@ -116,22 +134,40 @@ interface Session {
   timer: unknown
 }
 
+/** A `harvest` parked on a human. */
+interface PendingFrame {
+  resolve(harvest: RawHarvest): void
+  reject(err: Error): void
+  timer: unknown
+  tabId: number
+}
+
 export interface Router {
   handle(msg: unknown): Promise<Reply>
   /** Test seams. Not used by `sw.ts`. */
   sessionCount(): number
   sessionWindow(sessionId: string): number | null | undefined
+  /** Harvests currently parked on a human. Must return to 0 on every exit path. */
+  pendingCount(): number
 }
 
 /**
- * Injected into the retailer page to invoke the already-injected bundle.
+ * Injected into the retailer page to arm the already-injected bundle.
  *
  * Serialized by the browser, so it must reference nothing outside itself — that
  * constraint is the entire reason `injected.js` is a separate bundle rather than
- * one enormous function. `executeScript` awaits the returned promise.
+ * one enormous function. The session id travels through `args` so the overlay's
+ * eventual message can name its own session instead of us having to infer it from
+ * the sender's tab.
+ *
+ * `executeScript` awaits the returned promise, which here settles as soon as the
+ * viewfinder is on screen — the *user's* part is awaited over the message channel,
+ * not through this call.
  */
-function runInjectedHarvest(): unknown {
-  return (globalThis as unknown as { __dripdHarvest: { run(): unknown } }).__dripdHarvest.run()
+function armInjectedFrame(sessionId: string): unknown {
+  return (
+    globalThis as unknown as { __dripdHarvest: { arm(id: string): unknown } }
+  ).__dripdHarvest.arm(sessionId)
 }
 
 /** Injected on `surface`, so the user looking at the retailer page knows why. */
@@ -140,7 +176,7 @@ function showRetryBanner(): void {
   if (document.getElementById(id)) return
   var el = document.createElement('div')
   el.id = id
-  el.textContent = 'dripd: afvis cookies og rul til billederne, og prøv igen.'
+  el.textContent = 'dripd: sæt billedet i rammen, og tryk “Hent billeder” igen.'
   el.setAttribute(
     'style',
     'position:fixed;left:0;right:0;top:0;z-index:2147483647;padding:14px 18px;' +
@@ -200,6 +236,7 @@ export function createRouter(deps: RouterDeps): Router {
   const ttlMs = deps.ttlMs ?? DEFAULT_TTL_MS
   const loadTimeoutMs = deps.loadTimeoutMs ?? DEFAULT_LOAD_TIMEOUT_MS
   const settleMs = deps.settleMs ?? DEFAULT_SETTLE_MS
+  const frameTimeoutMs = deps.frameTimeoutMs ?? DEFAULT_FRAME_TIMEOUT_MS
   const newId = deps.newId ?? (() => crypto.randomUUID())
   const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const cancel = deps.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>))
@@ -207,10 +244,45 @@ export function createRouter(deps: RouterDeps): Router {
   const keepAlive = deps.keepAlive ?? defaultKeepAlive(api)
 
   const sessions = new Map<string, Session>()
+  const pending = new Map<string, PendingFrame>()
 
   /** Called after every change to `sessions`, never on its own. */
   function syncKeepAlive(): void {
     keepAlive(sessions.size > 0)
+  }
+
+  /** Settle a waiting `harvest`, once. Every exit from the framing state goes
+   *  through here so the timer is always cancelled and the map never leaks. */
+  function settleFrame(sessionId: string, outcome: RawHarvest | Error): boolean {
+    const p = pending.get(sessionId)
+    if (!p) return false
+    pending.delete(sessionId)
+    cancel(p.timer)
+    if (outcome instanceof Error) p.reject(outcome)
+    else p.resolve(outcome)
+    return true
+  }
+
+  // A closed popup is the user saying no. Without this the studio would sit on a
+  // spinner until the frame timeout, with nothing left on screen to explain it.
+  try {
+    api.tabs.onRemoved.addListener((tabId) => {
+      for (const [id, p] of pending) {
+        if (p.tabId === tabId) settleFrame(id, new Error(ERR.windowClosed))
+      }
+    })
+  } catch (e) {
+    log('tabs.onRemoved unavailable', e)
+  }
+
+  function awaitFrame(sessionId: string, tabId: number): Promise<RawHarvest> {
+    return new Promise<RawHarvest>((resolve, reject) => {
+      const timer = schedule(() => {
+        pending.delete(sessionId)
+        reject(new Error(ERR.frameTimeout))
+      }, frameTimeoutMs)
+      pending.set(sessionId, { resolve, reject, timer, tabId })
+    })
   }
 
   const wait = (ms: number) =>
@@ -346,6 +418,14 @@ export function createRouter(deps: RouterDeps): Router {
       timer: null,
     }
 
+    // Registered *before* the user frames anything, unlike the old auto-harvest:
+    // framing takes minutes, and the keep-alive that stops MV3 idle-terminating
+    // this worker mid-wait is driven by the session count. The TTL is armed only
+    // once a harvest actually arrives — until then the frame timeout is the
+    // bound, and it is far longer than 60 s.
+    sessions.set(session.id, session)
+    syncKeepAlive()
+
     try {
       await waitForLoad(opened.tabId)
       await wait(settleMs)
@@ -353,21 +433,25 @@ export function createRouter(deps: RouterDeps): Router {
         target: { tabId: opened.tabId },
         files: ['injected.js'],
       })
-      const results = await api.scripting.executeScript({
+
+      // Registered before arming, not after: the user can press the button the
+      // instant the viewfinder appears, and a message arriving before there is
+      // anything waiting for it would be dropped as a stray.
+      const framed = awaitFrame(session.id, opened.tabId)
+      // Marks the rejection handled without consuming it: if arming throws below,
+      // we never reach `await framed`, and an unhandled rejection in a service
+      // worker is a console error in the user's face for a case we handle here.
+      void framed.catch(() => {})
+      await api.scripting.executeScript({
         target: { tabId: opened.tabId },
-        func: runInjectedHarvest,
+        func: armInjectedFrame,
+        args: [session.id],
       })
-      const result = results?.[0]?.result
-      if (!looksLikeHarvest(result)) {
-        throw new Error(`unexpected harvest shape: ${typeof result}`)
-      }
+      log('framing', session.id, target.href)
 
-      // Registered only once we have something; a failed harvest leaves no
-      // session behind to expire.
-      sessions.set(session.id, session)
-      syncKeepAlive()
+      const result = await framed
+
       arm(session)
-
       const meta = (result as RawHarvest & { meta?: unknown }).meta
       log('harvest', session.id, `${result.images.length} images`, meta)
 
@@ -375,10 +459,41 @@ export function createRouter(deps: RouterDeps): Router {
       // ranking finds nothing usable the user needs it surfaced, not gone.
       return { ok: true, sessionId: session.id, harvest: result }
     } catch (e) {
-      log('harvest failed', e)
+      const message = (e as Error).message ?? String(e)
+      log('harvest failed', message)
+      settleFrame(session.id, new Error(message))
+      sessions.delete(session.id)
+      syncKeepAlive()
       await closeWindow(session)
-      return { ok: false, error: `${ERR.injectFailed}:${(e as Error).message ?? String(e)}` }
+      // The three ways a human ends a framing session are not extension
+      // failures, and the studio maps them to their own copy — so they travel
+      // as themselves rather than wrapped in `inject_failed`.
+      const bare: string[] = [ERR.windowClosed, ERR.frameTimeout]
+      return { ok: false, error: bare.includes(message) ? message : `${ERR.injectFailed}:${message}` }
     }
+  }
+
+  /**
+   * The overlay reporting in. Not reachable from the page: `bridge.ts` relays
+   * whatever the studio sends, but a `framed` message needs a session id that
+   * only ever existed inside the popup, and settling a promise nobody is holding
+   * is a no-op.
+   */
+  function acceptFrame(rawSessionId: unknown, rawHarvest: unknown, cancelled: unknown): Reply {
+    if (typeof rawSessionId !== 'string') return { ok: false, error: ERR.noSession }
+
+    if (cancelled === true) {
+      settleFrame(rawSessionId, new Error(ERR.windowClosed))
+      return { ok: true }
+    }
+    if (!looksLikeHarvest(rawHarvest)) {
+      settleFrame(rawSessionId, new Error(`unexpected harvest shape: ${typeof rawHarvest}`))
+      return { ok: false, error: ERR.injectFailed }
+    }
+    // A second press after the studio already has its harvest is not an error —
+    // the overlay stays mounted on purpose, so this is a normal thing to see.
+    settleFrame(rawSessionId, rawHarvest)
+    return { ok: true }
   }
 
   async function fetchBytes(rawSessionId: unknown, rawUrl: unknown): Promise<Reply> {
@@ -460,6 +575,12 @@ export function createRouter(deps: RouterDeps): Router {
           (req as { sessionId?: unknown }).sessionId,
           (req as { action?: unknown }).action,
         )
+      case 'framed':
+        return acceptFrame(
+          (req as { sessionId?: unknown }).sessionId,
+          (req as { harvest?: unknown }).harvest,
+          (req as { cancelled?: unknown }).cancelled,
+        )
       default:
         return { ok: false, error: `${ERR.unknownKind}:${String(req?.kind)}` }
     }
@@ -469,5 +590,6 @@ export function createRouter(deps: RouterDeps): Router {
     handle,
     sessionCount: () => sessions.size,
     sessionWindow: (id) => sessions.get(id)?.windowId,
+    pendingCount: () => pending.size,
   }
 }
