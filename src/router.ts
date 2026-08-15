@@ -99,6 +99,8 @@ export interface BrowserLike {
   tabs: {
     create(opts: Record<string, unknown>): Promise<TabInfo>
     get(tabId: number): Promise<TabInfo>
+    /** The authority on which tabs a window owns. `windows.create` is not. */
+    query(info: Record<string, unknown>): Promise<TabInfo[]>
     remove(tabId: number): Promise<void>
     onUpdated: {
       addListener(fn: (tabId: number, info: { status?: string }) => void): void
@@ -320,6 +322,31 @@ export function createRouter(deps: RouterDeps): Router {
   }
 
   /**
+   * Which tab a freshly created window owns.
+   *
+   * `windows.create` is documented to echo back a `tabs` array, and Chrome and
+   * Firefox do. **Safari resolves without one.** Treating that absence as failure
+   * meant abandoning a perfectly good window and opening another — the user got
+   * two popups, and the eventual injection went into a fallback tab that was
+   * never the retailer's page, so no viewfinder ever appeared.
+   *
+   * So ask the tabs API, which is the actual authority, and only fall back to
+   * what `create` echoed.
+   */
+  async function resolveWindowTab(win: WindowInfo): Promise<number | null> {
+    const echoed = win?.tabs?.[0]?.id
+    if (echoed != null) return echoed
+    if (win?.id == null) return null
+    try {
+      const tabs = await api.tabs.query({ windowId: win.id })
+      return tabs?.[0]?.id ?? null
+    } catch (e) {
+      log('tabs.query failed', e)
+      return null
+    }
+  }
+
+  /**
    * A focused popup, falling back to whatever the browser will give us.
    *
    * This opened unfocused at first, to be unobtrusive. That was right when the
@@ -344,12 +371,33 @@ export function createRouter(deps: RouterDeps): Router {
     for (let i = 0; i < attempts.length; i++) {
       try {
         const win = await attempts[i]!()
-        const tabId = win?.tabs?.[0]?.id
         // Which attempt won, and which tab we were handed. A popup showing the
         // wrong page is either the wrong URL requested or the right URL into
         // somebody else's tab, and only the tab id tells those apart.
-        log('windows.create', { attempt: i, windowId: win?.id, tabId, tabCount: win?.tabs?.length })
-        if (win?.id != null && tabId != null) return { windowId: win.id, tabId }
+        log('windows.create', { attempt: i, windowId: win?.id, tabCount: win?.tabs?.length })
+        if (win?.id == null) continue
+
+        const tabId = await resolveWindowTab(win)
+        if (tabId != null) {
+          // Safari ignores `focused` on create often enough that asking again
+          // afterwards is the difference between a window the user can see and
+          // one behind everything else.
+          try {
+            await api.windows.update(win.id, { focused: true })
+          } catch {
+            /* not fatal — the window exists either way */
+          }
+          return { windowId: win.id, tabId }
+        }
+
+        // A window we cannot address is worse than no window: it sits on screen
+        // and the next attempt opens another one beside it.
+        log('opened a window with no reachable tab; closing it', win.id)
+        try {
+          await api.windows.remove(win.id)
+        } catch {
+          /* ignore */
+        }
       } catch (e) {
         log('windows.create failed', e)
       }

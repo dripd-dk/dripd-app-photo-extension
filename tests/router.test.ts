@@ -50,6 +50,8 @@ interface FakeOptions {
   /** Leave the viewfinder up instead of pressing the button, so a test can drive
    *  the ways a framing session ends without one. */
   autoFrame?: boolean
+  /** Safari resolves `windows.create` without the documented `tabs` array. */
+  omitCreatedTabs?: boolean
 }
 
 function fakeApi(opts: FakeOptions = {}) {
@@ -57,6 +59,7 @@ function fakeApi(opts: FakeOptions = {}) {
   let windowFailures = opts.windowCreateFailures ?? 0
   let nextId = 100
   const closeListeners: ((tabId: number) => void)[] = []
+  const windowTabs = new Map<number, number>()
   let onArm: ((sessionId: string) => void) | null = null
 
   const log = {
@@ -83,7 +86,10 @@ function fakeApi(opts: FakeOptions = {}) {
         const id = nextId++
         const tabId = nextId++
         log.tabIds.push(tabId)
-        return Promise.resolve({ id, tabs: [{ id: tabId }] })
+        windowTabs.set(id, tabId)
+        // Safari answers without the documented `tabs` array; the window and its
+        // tab both exist, `create` just does not say so.
+        return Promise.resolve(opts.omitCreatedTabs ? { id } : { id, tabs: [{ id: tabId }] })
       },
       remove(id) {
         log.windowsRemoved.push(id)
@@ -104,6 +110,11 @@ function fakeApi(opts: FakeOptions = {}) {
         return Promise.resolve({ id })
       },
       get: () => Promise.resolve({ status: 'complete' }),
+      query: (info) => {
+        const id = (info as { windowId?: number }).windowId
+        const tabId = id == null ? undefined : windowTabs.get(id)
+        return Promise.resolve(tabId == null ? [] : [{ id: tabId }])
+      },
       remove(id) {
         log.tabsRemoved.push(id)
         return Promise.resolve()
@@ -275,6 +286,32 @@ describe('harvest', () => {
     expect(log.tabsCreated[0]).toMatchObject({ url: 'chrome-extension://dripd/onboarding.html' })
     expect(log.windowsCreated).toEqual([])
     expect(router.sessionCount()).toBe(0)
+  })
+
+  it('opens ONE window when create answers without a tabs array', async () => {
+    // Safari. `windows.create` resolves with the window and no `tabs`, and
+    // treating that as failure opened a second popup beside the first — then a
+    // third fallback tab, which is where the injection went, which is why no
+    // viewfinder ever appeared on the retailer's page.
+    const { router, log } = build({ omitCreatedTabs: true })
+
+    const reply = await router.handle({ kind: 'harvest', url: PDP })
+
+    expect(reply).toMatchObject({ ok: true })
+    expect(log.windowsCreated).toHaveLength(1)
+    expect(log.tabsCreated).toEqual([])
+    expect(log.windowsRemoved).toEqual([])
+    // And the tab it injects into is the one that window actually owns.
+    expect(log.scripts[0]).toMatchObject({ target: { tabId: log.tabIds[0] } })
+  })
+
+  it('asks for focus again after creating the window', async () => {
+    // Safari ignores `focused` on create often enough that the popup opens
+    // behind everything else.
+    const { router, log } = build()
+    await router.handle({ kind: 'harvest', url: PDP })
+
+    expect(log.windowsUpdated[0]?.opts).toMatchObject({ focused: true })
   })
 
   it('falls back to a plain popup, then to a tab', async () => {
