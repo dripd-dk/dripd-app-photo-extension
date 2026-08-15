@@ -17,12 +17,13 @@ These block every submission, so they are worth clearing first.
 Every store requires a **URL**, not a file. [`PRIVACY.md`](../PRIVACY.md) is the
 content; it needs a page.
 
-The GitHub rendering works as a stopgap:
-`https://github.com/dripd-dk/dripd-app-photo-extension/blob/main/PRIVACY.md`
+**Done.** <https://dripd.dk/udvidelsen/privatliv> — Danish and English, switchable
+on the page itself, because store reviewers are overwhelmingly not Danish speakers.
 
-A page on dripd.dk is better — reviewers treat a policy on the product's own
-domain as more credible, and a repo file can be edited by anyone with push access.
-Suggested: `https://dripd.dk/privatliv/udvidelsen`.
+It lives in `dripd-app/app/pages/udvidelsen/privatliv.vue` rather than in the
+database-backed legal pages, so it cannot drift from what the extension does: a
+permission change and a policy change land in the same review. [`PRIVACY.md`](../PRIVACY.md)
+is the same text — **keep the two in step.**
 
 ### 2. Screenshots
 
@@ -120,7 +121,21 @@ npm run build:firefox
 cd dist-firefox && zip -r ../dripd-firefox-1.0.0.zip . && cd ..
 ```
 
-Two things are specific to AMO:
+Three things are specific to AMO:
+
+**`data_collection_permissions` is required.** Firefox 140 added it and AMO rejects
+any upload without it — the manifest declares `required: ["websiteContent"]`, since
+the extension reads image addresses and product metadata off a shop page and hands
+them to dripd. `"none"` would be the narrower reading (the extension itself
+transmits nothing to us; the page does the upload), but under-declaring is a policy
+violation and over-declaring never is.
+
+Validate before uploading, with Mozilla's own linter — it is the same one AMO runs:
+
+```bash
+npx addons-linter dist-firefox      # want: 0 errors, 0 warnings, 0 notices
+```
+
 
 **The add-on id is already fixed** — `capture@dripd.dk`, in
 `browser_specific_settings`. Do not change it after the first submission; it is the

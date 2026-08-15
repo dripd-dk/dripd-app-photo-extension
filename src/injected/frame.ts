@@ -339,29 +339,45 @@ export function mountFrameOverlay(opts: FrameOverlayOpts): FrameOverlay {
     'position:fixed;inset:0;z-index:2147483647;pointer-events:none;overflow:hidden;',
   )
   const root = host.attachShadow({ mode: 'open' })
-  root.innerHTML = `
-    <style>${CSS}</style>
-    <div class="wrap">
-      <div class="cutout" part="cutout">
-        <i class="tick tl"></i><i class="tick tr"></i>
-        <i class="tick bl"></i><i class="tick br"></i>
-      </div>
-      <div class="hint"><b></b><span></span></div>
-      <div class="bar">
-        <button type="button" data-dripd="grab"></button>
-        <button type="button" class="cancel" data-dripd="cancel"></button>
-      </div>
-    </div>`
 
-  const cutout = root.querySelector<HTMLElement>('.cutout')!
-  const hint = root.querySelector<HTMLElement>('.hint')!
-  const grabBtn = root.querySelector<HTMLButtonElement>('[data-dripd="grab"]')!
-  const cancelBtn = root.querySelector<HTMLButtonElement>('[data-dripd="cancel"]')!
+  // Built node by node rather than with `innerHTML`. Nothing here is dynamic, so
+  // the string form was safe — but it trips addons-linter's UNSAFE_VAR_ASSIGNMENT
+  // and is the first thing a store reviewer stops on. An extension whose whole
+  // pitch is "read the code" should not make anyone pause over a parser call.
+  const make = <K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    className?: string,
+    text?: string,
+  ): HTMLElementTagNameMap[K] => {
+    const node = doc.createElement(tag)
+    if (className) node.className = className
+    if (text !== undefined) node.textContent = text
+    return node
+  }
 
-  hint.querySelector('b')!.textContent = s.title
-  hint.querySelector('span')!.textContent = s.body
-  grabBtn.textContent = s.grab
-  cancelBtn.textContent = s.cancel
+  const style = make('style')
+  style.textContent = CSS
+
+  const cutout = make('div', 'cutout')
+  for (const corner of ['tl', 'tr', 'bl', 'br']) cutout.append(make('i', `tick ${corner}`))
+
+  const hint = make('div', 'hint')
+  hint.append(make('b', undefined, s.title), make('span', undefined, s.body))
+
+  const grabBtn = make('button', undefined, s.grab)
+  grabBtn.type = 'button'
+  grabBtn.dataset.dripd = 'grab'
+
+  const cancelBtn = make('button', 'cancel', s.cancel)
+  cancelBtn.type = 'button'
+  cancelBtn.dataset.dripd = 'cancel'
+
+  const bar = make('div', 'bar')
+  bar.append(grabBtn, cancelBtn)
+
+  const wrap = make('div', 'wrap')
+  wrap.append(cutout, hint, bar)
+  root.append(style, wrap)
 
   function layout(): void {
     const r = cutoutRect(win)
