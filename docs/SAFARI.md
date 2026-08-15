@@ -94,6 +94,37 @@ An unsigned extension needs Safari told to allow it:
    Safari restarts.
 4. Safari → Settings → **Extensions** → enable **dripd photo**.
 
+## Building for the App Store
+
+```bash
+npm run build                      # the Xcode project references ../../../dist
+cd "safari/dripd photo"
+
+xcodebuild -scheme "dripd photo (macOS)" -configuration Release \
+  -archivePath /tmp/dripd-photo.xcarchive \
+  -allowProvisioningUpdates DEVELOPMENT_TEAM=U7MKB3Q475 CODE_SIGN_STYLE=Automatic \
+  archive
+
+xcodebuild -exportArchive -archivePath /tmp/dripd-photo.xcarchive \
+  -exportPath /tmp/dripd-export -exportOptionsPlist export-appstore.plist \
+  -allowProvisioningUpdates
+```
+
+`-allowProvisioningUpdates` mints what is missing without opening Xcode: it created
+the Mac App Store provisioning profile for `dk.dripd.photoextension` and the
+installer certificate for team `U7MKB3Q475`, neither of which existed on this Mac.
+The only Distribution certificate present belonged to a different team (Loofers
+ApS), so do not assume an existing one will do — **check the team, not the name on
+the certificate.**
+
+Output is `/tmp/dripd-export/dripd photo.pkg`, which is what App Store Connect
+takes. Upload it from Xcode's Organizer, which uses the signed-in account.
+
+**`LSApplicationCategoryType` is required** and lives in `macOS (App)/Info.plist`.
+Without it, archiving warns and the App Store rejects. It is set to
+`public.app-category.lifestyle`: the Mac App Store has no Shopping category, unlike
+the Chrome Web Store where this is listed under Shopping.
+
 ## Regenerating the wrapper
 
 If `manifest.json` gains a permission or a file, the wrapper needs regenerating:
@@ -114,11 +145,10 @@ than only in the project file.
 
 ## What is not done
 
-- **Distribution signing.** Development-signed for the dripd team, which runs
-  locally behind *Allow Unsigned Extensions*. Shipping needs either App Store
-  review or Developer ID + notarization; Safari has no sideloading for ordinary
-  users. `DEVELOPMENT_TEAM` is passed on the command line rather than committed to
-  the project, because regenerating the wrapper with `--force` would wipe it.
+- **Upload and review.** The App Store package builds and signs; nobody has
+  uploaded it yet. That needs an app record in App Store Connect and a reviewer
+  test account (the extension does nothing without a dripd.dk login) — see
+  [`REVIEWER-NOTES.md`](REVIEWER-NOTES.md).
 - **iOS.** The converter emitted an iOS target too. It has never been built or run,
   and the extension's popup-window flow almost certainly does not translate to iOS
   Safari — there are no extension-opened popup windows there. Treat the iOS target

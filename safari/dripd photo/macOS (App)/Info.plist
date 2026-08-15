@@ -4,5 +4,12 @@
 <dict>
 	<key>SFSafariWebExtensionConverterVersion</key>
 	<string>26.6</string>
+	<!-- Required by the App Store; archiving warns without it. The Mac App Store
+	     has no Shopping category (unlike the Chrome Web Store, where this is
+	     listed under Shopping), and Lifestyle is the closest fit for dripd.
+	     NOTE: `safari-web-extension-converter --force` regenerates this file and
+	     will drop this key. See docs/SAFARI.md. -->
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.lifestyle</string>
 </dict>
 </plist>
