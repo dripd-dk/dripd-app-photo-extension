@@ -160,7 +160,9 @@ npm run build
 **Load unpacked** → select `dist/`.
 
 **Firefox:** `npm run build:firefox`, then `about:debugging#/runtime/this-firefox` →
-**Load Temporary Add-on** → select any file in `dist-firefox/`.
+**Load Temporary Add-on** → select `dist-firefox/manifest.json`. Note that a
+temporary add-on is removed when Firefox restarts, and takes any permission you
+granted it with it.
 
 **Safari:** it can't load a folder — the extension has to be wrapped in a native
 app. See [`docs/SAFARI.md`](docs/SAFARI.md).
@@ -181,10 +183,14 @@ carries both forms and each build drops the one its browser doesn't want.
 ## Development
 
 ```bash
-npm run build:dev   # also matches localhost:3000, for working on dripd itself
-npm test            # 83 tests, no browser required
+npm run build:dev           # also matches localhost:3000, for working on dripd itself
+npm run build:firefox:dev   # the same, for Firefox
+npm test                    # 83 tests, no browser required
 npm run typecheck
 ```
+
+The plain `build:firefox` matches dripd.dk only, so it cannot talk to a local dev
+server — use `build:firefox:dev` for that.
 
 Architecture and design decisions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
