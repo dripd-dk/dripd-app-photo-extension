@@ -21,12 +21,67 @@ rather than keeping its own copy, so there is exactly one build of the extension
 the Safari app cannot silently ship a stale one. `dist/` is git-ignored, so a fresh
 clone has to build before Xcode will succeed.
 
-From the command line, without a signing identity:
+From the command line, signed with the dripd team:
 
 ```bash
 cd "safari/dripd photo"
 xcodebuild -scheme "dripd photo (macOS)" -configuration Debug \
-  CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
+  -allowProvisioningUpdates DEVELOPMENT_TEAM=U7MKB3Q475 CODE_SIGN_STYLE=Automatic build
+```
+
+`U7MKB3Q475` is dripd's paid Apple Developer Program team — the same one
+`dripd-mobile` signs with. `-allowProvisioningUpdates` lets xcodebuild mint the
+certificate and profile without opening Xcode, given a signed-in account
+(`dripddk@proton.me`).
+
+Verify the team rather than the certificate's name:
+
+```bash
+codesign -dv "/Applications/dripd photo.app" 2>&1 | grep TeamIdentifier
+# want: TeamIdentifier=U7MKB3Q475
+```
+
+The name printed on the chosen identity is whichever team member's certificate
+Xcode picked — it has read "Apple Development: Benjamin Albrectsen" while signing
+correctly for the dripd team. **The name on a certificate is not the team.**
+
+`spctl -a` will still say `rejected`: this is a Development certificate, not
+Developer ID + notarization. That is expected locally, and precisely what Safari's
+*Allow Unsigned Extensions* switch is for.
+
+### The ad-hoc fallback
+
+Without an account, ad-hoc works for local testing:
+
+```bash
+xcodebuild -scheme "dripd photo (macOS)" -configuration Debug \
+  CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES build
+```
+
+**`CODE_SIGNING_ALLOWED=YES` is load-bearing.** Setting it to `NO` still builds
+and still reports success, but Xcode then skips signing entirely and you get the
+linker's automatic signature — `flags=0x20002(adhoc,linker-signed)` with
+`Identifier=dripd photo Extension` instead of the bundle id. macOS refuses to
+register an app extension signed that way, **silently**: the app launches, Safari
+shows no extension, and nothing anywhere says why. Check with:
+
+```bash
+codesign -dv "/Applications/dripd photo.app/Contents/PlugIns/dripd photo Extension.appex"
+# want: flags=0x2(adhoc), Identifier=dk.dripd.photoextension.Extension
+pluginkit -m | grep dripd
+# want: dk.dripd.photoextension.Extension(1.0)
+```
+
+## Getting Safari to see it
+
+macOS discovers Safari extensions from the registry, so the app has to be
+somewhere LaunchServices trusts. A build in `DerivedData` does **not** register.
+Copy it to `/Applications` and run it once:
+
+```bash
+cp -R ~/Library/Developer/Xcode/DerivedData/dripd_photo-*/Build/Products/Debug/"dripd photo.app" /Applications/
+open "/Applications/dripd photo.app"
+pluginkit -m | grep dripd      # confirm before hunting through Safari's settings
 ```
 
 ## Enable it in Safari
@@ -59,10 +114,11 @@ than only in the project file.
 
 ## What is not done
 
-- **Signing.** Built ad-hoc so far, which is enough to run locally and not enough to
-  distribute. Distribution needs an Apple Developer account, a team id set on both
-  targets, and App Store review; Safari has no unsigned-extension sideloading for
-  ordinary users.
+- **Distribution signing.** Development-signed for the dripd team, which runs
+  locally behind *Allow Unsigned Extensions*. Shipping needs either App Store
+  review or Developer ID + notarization; Safari has no sideloading for ordinary
+  users. `DEVELOPMENT_TEAM` is passed on the command line rather than committed to
+  the project, because regenerating the wrapper with `--force` would wipe it.
 - **iOS.** The converter emitted an iOS target too. It has never been built or run,
   and the extension's popup-window flow almost certainly does not translate to iOS
   Safari — there are no extension-opened popup windows there. Treat the iOS target
