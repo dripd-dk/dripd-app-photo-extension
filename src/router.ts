@@ -178,6 +178,64 @@ function armInjectedFrame(sessionId: string): unknown {
   ).__dripdHarvest.arm(sessionId)
 }
 
+/**
+ * Cover the popup until the viewfinder is over the page.
+ *
+ * Opening a window onto a shop page and doing nothing to it for a second or two
+ * reads as a window that opened and broke. The gap is real and unavoidable: the
+ * page has to load, a consent wall has to be dismissed, and only then can the
+ * overlay mount. So nothing of the retailer's page is shown until there is a
+ * viewfinder on it — `mountFrameOverlay` removes this, in the same document, the
+ * moment it has one.
+ *
+ * Self-contained because it is serialised into the page: the id is a literal
+ * here and `LOADING_HOST_ID` in `frame.ts`, and the router tests match the two.
+ *
+ * Shadow DOM with an `all: initial` reset for the same reason the viewfinder
+ * uses one — a retailer stylesheet must not be able to blank the cover.
+ */
+function showLoadingScrim(): void {
+  var ID = '__dripd_loading'
+  if (document.getElementById(ID)) return
+  var host = document.createElement('div')
+  host.id = ID
+  host.setAttribute(
+    'style',
+    'all:initial;position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483646;',
+  )
+  var root = host.attachShadow({ mode: 'open' })
+  var style = document.createElement('style')
+  style.textContent =
+    ':host{all:initial}' +
+    '.wrap{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;' +
+    'flex-direction:column;align-items:center;justify-content:center;gap:16px;' +
+    'background:#faf8f5;font:600 14px/1.45 -apple-system,BlinkMacSystemFont,' +
+    '"Segoe UI",system-ui,sans-serif;color:#5c574e;}' +
+    '.ring{width:32px;height:32px;border-radius:50%;border:3px solid #eae6df;' +
+    'border-top-color:#059669;animation:dripd-spin .8s linear infinite;}' +
+    '@keyframes dripd-spin{to{transform:rotate(360deg)}}' +
+    '@media (prefers-reduced-motion:reduce){.ring{animation-duration:2.4s}}'
+  var wrap = document.createElement('div')
+  wrap.className = 'wrap'
+  var ring = document.createElement('div')
+  ring.className = 'ring'
+  var text = document.createElement('div')
+  text.textContent = 'Gør rammen klar…'
+  wrap.appendChild(ring)
+  wrap.appendChild(text)
+  root.appendChild(style)
+  root.appendChild(wrap)
+  document.documentElement.appendChild(host)
+
+  // Nothing should ever leave an opaque panel over a page the user can still
+  // click. Every path that ends a capture closes the window, so this only fires
+  // if one of them did not — in which case showing the page beats trapping it.
+  setTimeout(function () {
+    var stale = document.getElementById(ID)
+    if (stale) stale.remove()
+  }, 20000)
+}
+
 /** Injected on `surface`, so the user looking at the retailer page knows why. */
 function showRetryBanner(): void {
   var id = '__dripd_retry_banner'
@@ -493,6 +551,34 @@ export function createRouter(deps: RouterDeps): Router {
     sessions.set(session.id, session)
     syncKeepAlive()
 
+    /**
+     * Re-covering matters as much as covering: the first injection can land on
+     * the popup's about:blank and be discarded the moment the navigation
+     * commits, and a page that renders progressively is visible long before it
+     * reports `complete`. Every progress report is another chance to cover it.
+     */
+    const cover = () => {
+      void api.scripting
+        .executeScript({ target: { tabId: opened.tabId }, func: showLoadingScrim })
+        // No document to inject into yet. Cosmetic, and the next report retries.
+        .catch((e) => log('cover failed', e))
+    }
+    const onProgress = (id: number) => {
+      if (id === opened.tabId) cover()
+    }
+    let covering = true
+    const stopCovering = () => {
+      if (!covering) return
+      covering = false
+      try {
+        api.tabs.onUpdated.removeListener(onProgress)
+      } catch (e) {
+        log('could not stop covering', e)
+      }
+    }
+    api.tabs.onUpdated.addListener(onProgress)
+    cover()
+
     try {
       await waitForLoad(opened.tabId)
       await wait(settleMs)
@@ -505,6 +591,12 @@ export function createRouter(deps: RouterDeps): Router {
       } catch (e) {
         log('could not read tab before inject', e)
       }
+      // The last cover before the viewfinder, and the only one guaranteed to be
+      // on the document it will mount into. Listening stops first, so nothing
+      // can put a cover back over the viewfinder once it is up.
+      stopCovering()
+      cover()
+
       await api.scripting.executeScript({
         target: { tabId: opened.tabId },
         files: ['injected.js'],
@@ -535,6 +627,7 @@ export function createRouter(deps: RouterDeps): Router {
       // ranking finds nothing usable the user needs it surfaced, not gone.
       return { ok: true, sessionId: session.id, harvest: result }
     } catch (e) {
+      stopCovering()
       const message = (e as Error).message ?? String(e)
       log('harvest failed', message)
       settleFrame(session.id, new Error(message))

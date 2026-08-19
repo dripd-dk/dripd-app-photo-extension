@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRouter, type BrowserLike, type Router } from '../src/router'
+import { LOADING_HOST_ID } from '../src/injected/frame'
 import type { RawHarvest } from '../src/protocol'
 
 const PDP = 'https://www2.hm.com/da_dk/productpage.1358428002.html'
@@ -52,6 +53,17 @@ interface FakeOptions {
   autoFrame?: boolean
   /** Safari resolves `windows.create` without the documented `tabs` array. */
   omitCreatedTabs?: boolean
+  /**
+   * Hold the popup in `loading` so a test can drive the load itself.
+   *
+   * The default fake answers `tabs.get` with `complete`, which short-circuits
+   * `waitForLoad` before its listener ever matters — fine for the tests that
+   * only care about what happens afterwards, useless for anything about the
+   * window in which the page is visible and the viewfinder is not.
+   */
+  tabNeverComplete?: boolean
+  /** Reject only the cover injection, leaving the rest of the capture working. */
+  coverInjectFails?: boolean
 }
 
 function fakeApi(opts: FakeOptions = {}) {
@@ -59,6 +71,7 @@ function fakeApi(opts: FakeOptions = {}) {
   let windowFailures = opts.windowCreateFailures ?? 0
   let nextId = 100
   const closeListeners: ((tabId: number) => void)[] = []
+  const updateListeners: ((tabId: number, info: { status?: string }) => void)[] = []
   const windowTabs = new Map<number, number>()
   let onArm: ((sessionId: string) => void) | null = null
 
@@ -109,7 +122,7 @@ function fakeApi(opts: FakeOptions = {}) {
         if (!String(options.url ?? '').includes('onboarding')) log.tabIds.push(id)
         return Promise.resolve({ id })
       },
-      get: () => Promise.resolve({ status: 'complete' }),
+      get: () => Promise.resolve({ status: opts.tabNeverComplete ? 'loading' : 'complete' }),
       query: (info) => {
         const id = (info as { windowId?: number }).windowId
         const tabId = id == null ? undefined : windowTabs.get(id)
@@ -119,13 +132,22 @@ function fakeApi(opts: FakeOptions = {}) {
         log.tabsRemoved.push(id)
         return Promise.resolve()
       },
-      onUpdated: { addListener: () => {}, removeListener: () => {} },
+      onUpdated: {
+        addListener: (fn) => updateListeners.push(fn),
+        removeListener: (fn) => {
+          const i = updateListeners.indexOf(fn)
+          if (i >= 0) updateListeners.splice(i, 1)
+        },
+      },
       onRemoved: { addListener: (fn) => closeListeners.push(fn) },
     },
     scripting: {
       executeScript(options) {
         log.scripts.push(options)
         if (opts.executeScriptError) return Promise.reject(new Error(opts.executeScriptError))
+        if (opts.coverInjectFails && String(options.func ?? '').includes(LOADING_HOST_ID)) {
+          return Promise.reject(new Error('no tab with id'))
+        }
         // Arming carries the session id in `args`; that is the call a real user
         // would answer by pressing the button, so it is where the fake presses it.
         const args = options.args as unknown[] | undefined
@@ -141,6 +163,9 @@ function fakeApi(opts: FakeOptions = {}) {
     log,
     /** The user closing the popup. */
     closeTab: (tabId: number) => closeListeners.forEach((fn) => fn(tabId)),
+    /** The popup reporting progress — a navigation committing, or finishing. */
+    updateTab: (tabId: number, status: string) =>
+      [...updateListeners].forEach((fn) => fn(tabId, { status })),
     setOnArm: (fn: (sessionId: string) => void) => {
       onArm = fn
     },
@@ -160,7 +185,7 @@ function fakeFetch(body: Uint8Array, init: { ok?: boolean; status?: number; type
 
 function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
   const timers = fakeTimers()
-  const { api, log, closeTab, setOnArm } = fakeApi(opts)
+  const { api, log, closeTab, updateTab, setOnArm } = fakeApi(opts)
   // Kept off the timer seam on purpose: a 20 s heartbeat sharing `schedule` would
   // show up in every TTL assertion in this file.
   const keepAlive: boolean[] = []
@@ -188,7 +213,20 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
       })
     })
   }
-  return { router, log, timers, keepAlive, closeTab }
+  return { router, log, timers, keepAlive, closeTab, updateTab }
+}
+
+/** Every `executeScript` that put the loading scrim up. */
+function scrimInjections(scripts: Record<string, unknown>[]): number {
+  return scripts.filter((s) => String(s.func ?? '').includes(LOADING_HOST_ID)).length
+}
+
+/** Index of the call that injected the viewfinder bundle. */
+function injectedBundleAt(scripts: Record<string, unknown>[]): number {
+  return scripts.findIndex((s) => {
+    const files = s.files as string[] | undefined
+    return Array.isArray(files) && files.includes('injected.js')
+  })
 }
 
 /**
@@ -243,11 +281,14 @@ describe('harvest', () => {
     const { router, log } = build()
     await router.handle({ kind: 'harvest', url: PDP })
 
-    expect(log.scripts[0]).toMatchObject({ files: ['injected.js'] })
-    expect(typeof log.scripts[1]!.func).toBe('function')
+    // Found rather than indexed: the loading scrim is injected before either of
+    // these, so a fixed position only records how many covers happen to run.
+    const bundleAt = injectedBundleAt(log.scripts)
+    expect(bundleAt).toBeGreaterThanOrEqual(0)
+    expect(typeof log.scripts[bundleAt + 1]!.func).toBe('function')
     // The overlay names its own session when it reports back, rather than the
     // background inferring one from the sender's tab.
-    expect(log.scripts[1]!.args).toEqual(['s1'])
+    expect(log.scripts[bundleAt + 1]!.args).toEqual(['s1'])
   })
 
   it('injects an arm call that survives serialization', () => {
@@ -256,7 +297,7 @@ describe('harvest', () => {
     // in a fresh scope is the same trip, and proves it.
     const { router, log } = build()
     return router.handle({ kind: 'harvest', url: PDP }).then(() => {
-      const source = String(log.scripts[1]!.func)
+      const source = String(log.scripts[injectedBundleAt(log.scripts) + 1]!.func)
       const revived = new Function(`return (${source})`)() as (id: string) => unknown
       ;(globalThis as unknown as { __dripdHarvest: unknown }).__dripdHarvest = {
         arm: (id: string) => `armed:${id}`,
@@ -587,5 +628,69 @@ describe('session TTL', () => {
 
     expect(log.windowsRemoved).toHaveLength(1)
     expect(router.sessionCount()).toBe(0)
+  })
+})
+
+/**
+ * The window between the popup opening and the viewfinder appearing.
+ *
+ * The retailer page loads, a consent wall is dismissed, and the overlay mounts —
+ * seconds, on a real page. Everything the user could see in that time is a shop
+ * page with no viewfinder over it, which reads as a window that opened and did
+ * nothing. So the popup stays covered until the viewfinder itself takes the
+ * cover down.
+ */
+describe('the loading scrim', () => {
+  it('covers the popup before anything is injected into the retailer page', async () => {
+    const { router, log } = build()
+    await startSession(router)
+
+    const bundleAt = injectedBundleAt(log.scripts)
+    expect(bundleAt).toBeGreaterThan(0)
+    expect(String(log.scripts[0]!.func ?? '')).toContain(LOADING_HOST_ID)
+  })
+
+  it('covers it again once the retailer page has settled', async () => {
+    // The first injection can land on the popup's about:blank and be thrown away
+    // when the navigation commits. This one cannot: it runs after the load wait,
+    // on the document the viewfinder is about to mount into.
+    const { router, log } = build()
+    await startSession(router)
+
+    const bundleAt = injectedBundleAt(log.scripts)
+    expect(scrimInjections(log.scripts.slice(0, bundleAt))).toBeGreaterThanOrEqual(2)
+  })
+
+  it('re-covers the page every time the loading popup reports progress', async () => {
+    const { router, log, updateTab } = build({ tabNeverComplete: true })
+    void router.handle({ kind: 'harvest', url: PDP })
+    for (let i = 0; i < 50 && log.scripts.length === 0; i++) await Promise.resolve()
+
+    const before = scrimInjections(log.scripts)
+    updateTab(log.tabIds[0]!, 'loading')
+    await Promise.resolve()
+
+    expect(scrimInjections(log.scripts)).toBe(before + 1)
+  })
+
+  it('stops re-covering once the viewfinder is up, so it cannot cover that', async () => {
+    const { router, log, updateTab } = build({ autoFrame: false })
+    void router.handle({ kind: 'harvest', url: PDP })
+    await untilFraming(router)
+
+    const before = scrimInjections(log.scripts)
+    updateTab(log.tabIds[0]!, 'loading')
+    await Promise.resolve()
+
+    expect(scrimInjections(log.scripts)).toBe(before)
+  })
+
+  it('leaves the harvest alone when the page cannot be covered', async () => {
+    // A popup with no document yet rejects the injection. That is cosmetic, and
+    // must not cost the user the capture.
+    const { router } = build({ coverInjectFails: true })
+    const reply = await router.handle({ kind: 'harvest', url: PDP })
+
+    expect(reply.ok).toBe(true)
   })
 })

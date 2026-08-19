@@ -16,6 +16,7 @@ import {
   markFramed,
   mountFrameOverlay,
   HOST_ID,
+  LOADING_HOST_ID,
 } from '../src/injected/frame'
 import type { RawHarvest } from '../src/protocol'
 
@@ -270,5 +271,25 @@ describe('mountFrameOverlay', () => {
 
     expect(rule).toMatch(/rgba\(255,\s*255,\s*255/)
     expect(rule).toMatch(/rgba\(20,\s*19,\s*17,\s*0\.5\)/)
+  })
+})
+
+describe('the loading scrim', () => {
+  it('is taken down by the viewfinder that replaces it', () => {
+    // The scrim's whole job is to stop the retailer page being visible without a
+    // viewfinder over it. Removing it here — in the same document, right after
+    // the overlay is built — is what leaves no frame in between.
+    const scrim = document.createElement('div')
+    scrim.id = LOADING_HOST_ID
+    document.documentElement.appendChild(scrim)
+
+    mountFrameOverlay({ onGrab: () => {}, onCancel: () => {} })
+
+    expect(document.getElementById(LOADING_HOST_ID)).toBeNull()
+    expect(document.getElementById(HOST_ID)).not.toBeNull()
+  })
+
+  it('mounts fine when no scrim was ever injected', () => {
+    expect(() => mountFrameOverlay({ onGrab: () => {}, onCancel: () => {} })).not.toThrow()
   })
 })

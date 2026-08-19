@@ -84,6 +84,29 @@ rather than on precise aim.
   `document.querySelectorAll('img')` regardless, so `collect` cannot mistake the
   extension's own chrome for a product photo.
 
+## Nothing of the page before the viewfinder
+
+Between the popup opening and the viewfinder appearing there is a second or two
+of the retailer's own page: the load has to finish, `settleMs` has to pass, a
+consent wall has to be dismissed, and only then can the overlay mount. Shown
+bare, that reads as a window that opened and did nothing.
+
+So the popup is covered. `showLoadingScrim` in `router.ts` is injected the moment
+the window exists and again on every `tabs.onUpdated` for that tab — the first
+injection can land on the popup's `about:blank` and be discarded when the
+navigation commits, and a page that renders progressively is visible long before
+it reports `complete`. Listening stops just before `injected.js` goes in, and one
+last cover is injected there, on the document the viewfinder will mount into.
+
+`mountFrameOverlay` takes it down, in that same document, in the same turn it
+builds the overlay — a signal from the background context would leave a frame in
+which the page is bare. The id is a literal in `router.ts` because the function
+is serialised into the page and cannot close over an import; `frame.ts` exports
+it as `LOADING_HOST_ID` and the router tests match against that, so the two
+cannot drift. A 20 s self-removal inside the cover is the valve: every path that
+ends a capture closes the window, and if one ever does not, showing the page
+beats trapping the user behind an opaque panel.
+
 ## Security
 
 The extension is functionally a CORS-bypass proxy holding the user's cookies. The
@@ -126,7 +149,7 @@ is worthless after a restart.
 
 ## Tests
 
-83 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+92 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `consent` / `key` / `frame` — pure functions over a happy-dom DOM. The
@@ -149,6 +172,12 @@ against a stale `dist/`.
   direction bug the first time.
 - `injected-bundle` — evaluates the built `dist/injected.js` the way the browser
   does, catching a bundle that imports something the build left out.
+- the loading cover — that it goes up before anything else is injected, goes up
+  again on every progress report, stops once the viewfinder is armed (or it
+  would cover that), and that a cover the popup rejects still leaves a working
+  capture. `tabNeverComplete` holds the popup in `loading` so the window this is
+  all about can actually be driven; the default fake answers `tabs.get` with
+  `complete` and skips straight past it.
 
 What tests cannot cover is the thing most likely to break: whether an
 extension-driven popup on a bot-managed product page behaves like a hand-typed
