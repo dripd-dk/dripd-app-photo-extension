@@ -97,16 +97,28 @@ Covering it takes two halves, because one of them cannot start early enough.
 at the shop means there is no document until that server answers, and nothing
 can be injected into a tab that has none — so the cover arrived exactly as late
 as the retailer was slow, which on a slow retailer is the whole problem. Our own
-page is read from disk, paints as fast as the window appears, and only then does
-`tabs.update` send the tab on to the retailer. The page loads behind something
-rather than in front of nothing.
+page is read from disk and paints as fast as the window appears.
+
+**And then something waits for it.** `windows.create` resolves when the *window*
+exists, not when its tab has loaded, and everything between that and the
+navigation is synchronous — so the first version of this navigated to the
+retailer within milliseconds, left the loading page before it had ever painted,
+and reproduced the original bug exactly. Opening on our own page buys nothing
+unless the navigation is gated on that page being on screen. It is, with a short
+budget (`DEFAULT_LOADING_PAGE_TIMEOUT_MS`), because a page that never reports
+`complete` must not hold a capture hostage.
+
+That wait matches by URL prefix, not by origin: an extension URL's origin is the
+string `"null"`, so an origin comparison there is true of every non-http page and
+decides nothing.
 
 That inversion has a sharp edge: `waitForLoad` used to settle on the first
-`complete` it saw, and the first `complete` is now always ours. It takes the
-retailer's origin and settles only on a `complete` whose tab URL is on it —
-otherwise the harvester is injected into the extension's own spinner and
-harvests it. A tab that cannot be navigated ends the capture rather than being
-discovered later as an empty harvest of that spinner.
+`complete` it saw, and with two pages in one tab a `complete` now means either
+"our spinner is up" or "the shop is loaded" — opposite actions. It takes a
+predicate for which page it is waiting on, and the retailer's is an origin check.
+Otherwise the harvester is injected into the extension's own spinner and harvests
+it. A tab that cannot be navigated ends the capture rather than being discovered
+later as an empty harvest of that spinner.
 
 **`showLoadingScrim` covers the retailer's document**, from the moment it
 replaces the loading page. It is injected on every `tabs.onUpdated` for that tab,
@@ -174,7 +186,7 @@ is worthless after a restart.
 
 ## Tests
 
-98 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+101 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `consent` / `key` / `frame` — pure functions over a happy-dom DOM. The
@@ -197,8 +209,10 @@ against a stale `dist/`.
   direction bug the first time.
 - `injected-bundle` — evaluates the built `dist/injected.js` the way the browser
   does, catching a bundle that imports something the build left out.
-- the loading cover — that the window opens on our own page and is navigated on
-  from there, that our page finishing is not mistaken for the retailer
+- the loading cover — that the window opens on our own page, that nothing
+  navigates off it or covers it until it is actually on screen (`popupStartsLoading`
+  holds the tab in `loading` the way a real one starts, which the fake used to
+  hide by reporting `complete` from the first instant), that our page finishing is not mistaken for the retailer
   finishing, that the retailer's document is covered on every progress report,
   that covering stops once the viewfinder is armed (or it would cover that), and
   that a cover the popup rejects still leaves a working capture. The fake's tabs

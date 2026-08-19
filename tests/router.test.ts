@@ -70,6 +70,17 @@ interface FakeOptions {
   loadTimeoutMs?: number
   /** Reject the navigation off our loading page. */
   tabsUpdateFails?: boolean
+  /**
+   * The popup's tab starts in `loading`, as a real one does.
+   *
+   * `windows.create` resolves when the window exists, not when its tab has
+   * loaded — so a fake that reports `complete` from the first instant hides the
+   * entire question of whether the router waits for its own page to be on
+   * screen before navigating off it.
+   */
+  popupStartsLoading?: boolean
+  /** Budget for the wait on our own loading page. */
+  loadingPageTimeoutMs?: number
 }
 
 function fakeApi(opts: FakeOptions = {}) {
@@ -83,6 +94,8 @@ function fakeApi(opts: FakeOptions = {}) {
    *  loading page and only then navigates, so "which page" is now a question the
    *  router has to get right. */
   const tabUrls = new Map<number, string>()
+  /** Per-tab load state, so a test can hold a tab mid-load and release it. */
+  const tabStatus = new Map<number, string>()
   let onArm: ((sessionId: string) => void) | null = null
 
   const log = {
@@ -112,6 +125,7 @@ function fakeApi(opts: FakeOptions = {}) {
         log.tabIds.push(tabId)
         windowTabs.set(id, tabId)
         tabUrls.set(tabId, String(options.url ?? ''))
+        tabStatus.set(tabId, opts.popupStartsLoading ? 'loading' : 'complete')
         // Safari answers without the documented `tabs` array; the window and its
         // tab both exist, `create` just does not say so.
         return Promise.resolve(opts.omitCreatedTabs ? { id } : { id, tabs: [{ id: tabId }] })
@@ -133,6 +147,7 @@ function fakeApi(opts: FakeOptions = {}) {
         // now created active, so the URL is what tells them apart.
         if (!String(options.url ?? '').includes('onboarding')) log.tabIds.push(id)
         tabUrls.set(id, String(options.url ?? ''))
+        tabStatus.set(id, opts.popupStartsLoading ? 'loading' : 'complete')
         return Promise.resolve({ id })
       },
       update(tabId, options) {
@@ -145,7 +160,7 @@ function fakeApi(opts: FakeOptions = {}) {
       },
       get: (tabId) =>
         Promise.resolve({
-          status: opts.tabNeverComplete ? 'loading' : 'complete',
+          status: opts.tabNeverComplete ? 'loading' : (tabStatus.get(tabId) ?? 'complete'),
           url: tabUrls.get(tabId),
         }),
       query: (info) => {
@@ -191,8 +206,10 @@ function fakeApi(opts: FakeOptions = {}) {
     /** A navigation the fake was told to stall finally committing. */
     navigateTab: (tabId: number, url: string) => tabUrls.set(tabId, url),
     /** The popup reporting progress — a navigation committing, or finishing. */
-    updateTab: (tabId: number, status: string) =>
-      [...updateListeners].forEach((fn) => fn(tabId, { status })),
+    updateTab: (tabId: number, status: string) => {
+      tabStatus.set(tabId, status)
+      ;[...updateListeners].forEach((fn) => fn(tabId, { status }))
+    },
     setOnArm: (fn: (sessionId: string) => void) => {
       onArm = fn
     },
@@ -223,6 +240,7 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
     version: '0.1.0',
     ttlMs: 60_000,
     loadTimeoutMs: opts.loadTimeoutMs ?? 10,
+    loadingPageTimeoutMs: opts.loadingPageTimeoutMs ?? 10,
     settleMs: 10,
     newId: () => `s${++n}`,
     schedule: timers.schedule,
@@ -751,6 +769,58 @@ describe('opening the popup', () => {
     await startSession(router)
 
     expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+  })
+
+  it('waits for our page to be on screen before navigating off it', async () => {
+    // The bug this exists to stop: `windows.create` resolves when the WINDOW
+    // exists, not when its tab has loaded or painted. Navigating on the next
+    // line hands the retailer a window the loading page never reached — so the
+    // user watches the shop load, exactly as they did before the page existed.
+    const { router, log, updateTab } = build({
+      popupStartsLoading: true,
+      loadingPageTimeoutMs: 5_000,
+    })
+    void router.handle({ kind: 'harvest', url: PDP })
+    await settleMicrotasks()
+
+    expect(log.tabsUpdated).toEqual([])
+
+    updateTab(log.tabIds[0]!, 'complete')
+    await settleMicrotasks()
+
+    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+  })
+
+  it('gives up waiting rather than stranding the capture on our own page', async () => {
+    // A loading page that never reports complete must not hold the capture
+    // forever. It is read from disk, so the budget is short and going on
+    // without it beats hanging.
+    const { router, log, timers } = build({ popupStartsLoading: true, loadingPageTimeoutMs: 5_000 })
+    void router.handle({ kind: 'harvest', url: PDP })
+    await settleMicrotasks()
+    expect(log.tabsUpdated).toEqual([])
+
+    timers.fireAll()
+    await settleMicrotasks()
+
+    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+  })
+
+  it('does not cover our own page while waiting for it', async () => {
+    // Covering the loading page would be a spinner over a spinner, and the
+    // cover listener must not be live until the retailer's document is what the
+    // tab is showing.
+    const { router, log, updateTab } = build({
+      popupStartsLoading: true,
+      loadingPageTimeoutMs: 5_000,
+    })
+    void router.handle({ kind: 'harvest', url: PDP })
+    await settleMicrotasks()
+
+    updateTab(log.tabIds[0]!, 'loading')
+    await settleMicrotasks()
+
+    expect(scrimInjections(log.scripts)).toBe(0)
   })
 
   it('opens the fallback tab on our own page too', async () => {

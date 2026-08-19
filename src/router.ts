@@ -80,6 +80,15 @@ const KEEPALIVE_MS = 20_000
  * and the retailer is navigated to afterwards.
  */
 const LOADING_PAGE = 'loading.html'
+/**
+ * How long to wait for that page before going on without it.
+ *
+ * It is markup and CSS read from disk, so this is generous already. The wait
+ * exists because `windows.create` resolves when the *window* exists and not when
+ * its tab has loaded — but a page that somehow never reports `complete` must not
+ * hold a capture hostage, so the budget is short and missing it is survivable.
+ */
+const DEFAULT_LOADING_PAGE_TIMEOUT_MS = 2_000
 
 export interface TabInfo {
   id?: number
@@ -135,6 +144,7 @@ export interface RouterDeps {
   version?: string
   ttlMs?: number
   loadTimeoutMs?: number
+  loadingPageTimeoutMs?: number
   settleMs?: number
   frameTimeoutMs?: number
   now?: () => number
@@ -313,6 +323,7 @@ export function createRouter(deps: RouterDeps): Router {
   const version = deps.version ?? '0.0.0'
   const ttlMs = deps.ttlMs ?? DEFAULT_TTL_MS
   const loadTimeoutMs = deps.loadTimeoutMs ?? DEFAULT_LOAD_TIMEOUT_MS
+  const loadingPageTimeoutMs = deps.loadingPageTimeoutMs ?? DEFAULT_LOADING_PAGE_TIMEOUT_MS
   const settleMs = deps.settleMs ?? DEFAULT_SETTLE_MS
   const frameTimeoutMs = deps.frameTimeoutMs ?? DEFAULT_FRAME_TIMEOUT_MS
   const newId = deps.newId ?? (() => crypto.randomUUID())
@@ -485,7 +496,9 @@ export function createRouter(deps: RouterDeps): Router {
     return null
   }
 
-  /** Is the tab showing the page we are waiting for, or still our own? */
+  /** Is the tab showing a page on this origin? Only meaningful for http(s):
+   *  an extension URL's origin is the string "null", which would be true of
+   *  every other non-special scheme too. */
   function isOnOrigin(url: string | undefined, origin: string): boolean {
     if (!url) return false
     try {
@@ -496,15 +509,23 @@ export function createRouter(deps: RouterDeps): Router {
   }
 
   /**
-   * Resolve when the tab reports `complete` **on the retailer's origin**, or when
-   * the budget runs out — a slow page still gets harvested, it just gets
+   * Resolve when the tab reports `complete` **on the page we are waiting for**,
+   * or when the budget runs out — a slow page still gets harvested, it just gets
    * harvested early.
    *
-   * The origin check is not a refinement. The popup now opens on the extension's
-   * own loading page, which reaches `complete` first every single time; settling
-   * on that would inject the harvester into our own spinner and harvest it.
+   * `isTarget` rather than an origin string because the two callers ask
+   * different questions: the retailer is an origin, and our own loading page is
+   * one exact URL whose origin is unusable.
+   *
+   * Which page is not a refinement of the question. The popup opens on the
+   * extension's own page, so a `complete` can mean either "our spinner is up"
+   * or "the shop is loaded", and the two lead to opposite actions.
    */
-  function waitForLoad(tabId: number, origin: string): Promise<void> {
+  function waitForLoad(
+    tabId: number,
+    isTarget: (url: string | undefined) => boolean,
+    timeoutMs: number,
+  ): Promise<void> {
     return new Promise<void>((resolve) => {
       let settled = false
       let timer: unknown = null
@@ -526,7 +547,7 @@ export function createRouter(deps: RouterDeps): Router {
         api.tabs
           .get(tabId)
           .then((tab) => {
-            if (tab?.status === 'complete' && isOnOrigin(tab.url, origin)) finish()
+            if (tab?.status === 'complete' && isTarget(tab.url)) finish()
           })
           .catch(() => {
             /* the tab may be mid-navigation; the listener still covers us */
@@ -538,7 +559,7 @@ export function createRouter(deps: RouterDeps): Router {
       }
 
       api.tabs.onUpdated.addListener(listener)
-      timer = schedule(finish, loadTimeoutMs)
+      timer = schedule(finish, timeoutMs)
 
       // The tab can reach `complete` before the listener is attached.
       checkTab()
@@ -567,7 +588,8 @@ export function createRouter(deps: RouterDeps): Router {
       return { ok: false, error: ERR.needsPermission }
     }
 
-    const opened = await openPopup(api.runtime.getURL(LOADING_PAGE))
+    const loadingUrl = api.runtime.getURL(LOADING_PAGE)
+    const opened = await openPopup(loadingUrl)
     if (!opened) return { ok: false, error: ERR.openFailed }
 
     const session: Session = {
@@ -610,15 +632,35 @@ export function createRouter(deps: RouterDeps): Router {
         log('could not stop covering', e)
       }
     }
-    api.tabs.onUpdated.addListener(onProgress)
-
     try {
+      // Wait for our own page to actually BE on screen.
+      //
+      // `windows.create` resolves when the window exists, not when its tab has
+      // loaded, and everything between here and the navigation is synchronous.
+      // Without this the retailer is navigated to within milliseconds — the
+      // loading page is left before it ever paints, and the user watches the
+      // shop load exactly as they did before this page existed. Opening on our
+      // own page buys nothing unless something waits for it.
+      //
+      // Matched by URL prefix rather than origin: an extension URL's origin is
+      // the string "null".
+      await waitForLoad(
+        opened.tabId,
+        (u) => !!u && u.startsWith(loadingUrl),
+        loadingPageTimeoutMs,
+      )
+
+      // Armed only now. Before this point the tab is showing our own page, and
+      // covering a spinner with a spinner is the one thing the cover must not
+      // do.
+      api.tabs.onUpdated.addListener(onProgress)
+
       // Only now does the retailer start loading, behind a page that is already
       // on screen rather than in front of nothing. A tab we cannot navigate is
       // a popup stuck on our spinner with nothing to harvest, so a failure here
       // ends the capture instead of being discovered later as an empty one.
       await api.tabs.update(opened.tabId, { url: target.href })
-      await waitForLoad(opened.tabId, target.origin)
+      await waitForLoad(opened.tabId, (u) => isOnOrigin(u, target.origin), loadTimeoutMs)
       await wait(settleMs)
       // What that tab is ACTUALLY showing before we inject into it. If this is
       // not the retailer, everything downstream is aimed at the wrong page and
