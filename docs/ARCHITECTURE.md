@@ -87,9 +87,9 @@ rather than on precise aim.
 ## Nothing of the page before the viewfinder
 
 Between the popup opening and the viewfinder appearing there is a second or two
-of the retailer's own page: the load has to finish, `settleMs` has to pass, a
-consent wall has to be dismissed, and only then can the overlay mount. Shown
-bare, that reads as a window that opened and did nothing.
+of the retailer's own page: the load has to finish, `settleMs` has to pass, and
+only then can the overlay mount. Shown bare, that reads as a window that opened
+and did nothing.
 
 Covering it takes two halves, because one of them cannot start early enough.
 
@@ -143,6 +143,29 @@ two cannot drift. A 20 s self-removal inside the cover is the valve — every pa
 that ends a capture closes the window, and if one ever does not, showing the page
 beats trapping the user behind an opaque panel.
 
+## The extension does not touch a cookie wall
+
+It used to. `arm` clicked the reject button, waited 400 ms, and mounted the
+viewfinder. A real cookie wall reloads the page when either button is pressed,
+and that reload raced the 400 ms timer — when it won, it took the just-mounted
+overlay with it, and nothing re-arms a document that has been replaced. The user
+got a shop page with no viewfinder and no button, and the session hung until the
+five-minute frame timeout. Intermittently, because it was a race.
+
+Read from the outside it looked like the extension loading the page twice: first
+paint, consent click, reload. It was our own click.
+
+The wall is the user's to dismiss now. They are already standing in front of the
+page to frame a photo, and the overlay is `pointer-events: none` everywhere but
+its own button bar — so the wall is one click away for them and zero navigations
+away for us. `meta.version` is 3; `consentDismissed` is gone with the code.
+
+The deeper problem this exposed is still open: **nothing re-arms after a
+navigation.** `__dripdHarvest` lives in the isolated world of one document, and a
+redirect or a soft navigation on the retailer's own initiative loses the
+viewfinder exactly the same way. Removing our own click removes the cause we
+were creating, not the class.
+
 ## Security
 
 The extension is functionally a CORS-bypass proxy holding the user's cookies. The
@@ -178,7 +201,6 @@ is worthless after a restart.
 | `src/bridge.ts` | The relay and its origin checks — the security boundary |
 | `src/bridge.content.ts` | Content-script wiring |
 | `src/injected/collect.ts` | Read images and metadata off a DOM |
-| `src/injected/consent.ts` | Reject a cookie wall. Never accepts |
 | `src/injected/frame.ts` | The viewfinder, and what counts as framed |
 | `src/injected/index.ts` | Installs `__dripdHarvest` in the isolated world |
 | `src/loading.html` | The popup's first paint, before the retailer loads |
@@ -189,7 +211,7 @@ is worthless after a restart.
 101 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
-- `collect` / `consent` / `key` / `frame` — pure functions over a happy-dom DOM. The
+- `collect` / `key` / `frame` — pure functions over a happy-dom DOM. The
   `frame` tests feed rects in through a `data-rect` attribute, because happy-dom
   does no layout: every element reports 0×0, so a selection test written against
   real geometry passes without deciding anything.

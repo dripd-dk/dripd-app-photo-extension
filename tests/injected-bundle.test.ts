@@ -33,7 +33,7 @@ interface Framed {
   harvest?: {
     images: { url: string; framed?: boolean }[]
     title: string | null
-    meta: { consentDismissed: boolean; framed: boolean; framedMatches: number }
+    meta: { framed: boolean; framedMatches: number }
   }
 }
 
@@ -83,7 +83,7 @@ describe('dist/injected.js', () => {
     document.getElementById('__dripd_frame')?.remove()
   })
 
-  it('rejects the cookie wall, waits, and harvests only when the button is pressed', async () => {
+  it('leaves the cookie wall alone, and harvests only when the button is pressed', async () => {
     document.head.innerHTML = `<meta property="og:image" content="${CDN}/a1.jpg?imwidth=657">`
     document.title = 'Skjorte - Rød'
     document.body.innerHTML = `
@@ -100,17 +100,19 @@ describe('dist/injected.js', () => {
       <script type="application/ld+json">{"@type":"Product","name":"Skjorte","offers":{"price":"429"}}</script>
     `
 
-    let accepted = false
-    document.getElementById('accept')!.addEventListener('click', () => {
-      accepted = true
-    })
-    document.getElementById('cmp')!.addEventListener('click', (e) => {
-      if ((e.target as Element).id === 'reject') document.getElementById('cmp')!.remove()
-    })
+    // A real cookie wall reloads the page when either button is pressed, which
+    // is why nothing here presses one. The wall is the user's to dismiss: the
+    // viewfinder is pointer-transparent everywhere but its own button bar, so
+    // it is one click away for them and zero navigations away for us.
+    const clicked: string[] = []
+    for (const id of ['accept', 'reject']) {
+      document.getElementById(id)!.addEventListener('click', () => clicked.push(id))
+    }
 
     await loadBundle().arm(SESSION)
 
-    expect(accepted).toBe(false)
+    expect(clicked).toEqual([])
+    expect(document.getElementById('cmp')).not.toBeNull()
     // The whole change in one assertion: armed, mounted, and nothing collected.
     expect(document.getElementById('__dripd_frame')).not.toBeNull()
     expect(sent).toEqual([])
@@ -121,7 +123,6 @@ describe('dist/injected.js', () => {
     expect(sent[0]).toMatchObject({ kind: 'framed', sessionId: SESSION })
     const harvest = sent[0]!.harvest!
     expect(harvest.title).toBe('Skjorte - Rød')
-    expect(harvest.meta.consentDismissed).toBe(true)
 
     // The thumbnail is off to the left of the viewfinder; the photo filling it is
     // the one the user framed, and it is the only entry that carries the flag.
