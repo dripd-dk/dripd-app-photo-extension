@@ -64,6 +64,12 @@ interface FakeOptions {
   tabNeverComplete?: boolean
   /** Reject only the cover injection, leaving the rest of the capture working. */
   coverInjectFails?: boolean
+  /** Ignore `tabs.update`, so a test can drive the retailer navigation itself. */
+  stallNavigation?: boolean
+  /** Long enough that the load timeout stays parked instead of firing. */
+  loadTimeoutMs?: number
+  /** Reject the navigation off our loading page. */
+  tabsUpdateFails?: boolean
 }
 
 function fakeApi(opts: FakeOptions = {}) {
@@ -73,6 +79,10 @@ function fakeApi(opts: FakeOptions = {}) {
   const closeListeners: ((tabId: number) => void)[] = []
   const updateListeners: ((tabId: number, info: { status?: string }) => void)[] = []
   const windowTabs = new Map<number, number>()
+  /** What each tab is currently showing. The popup opens on the extension's own
+   *  loading page and only then navigates, so "which page" is now a question the
+   *  router has to get right. */
+  const tabUrls = new Map<number, string>()
   let onArm: ((sessionId: string) => void) | null = null
 
   const log = {
@@ -80,6 +90,7 @@ function fakeApi(opts: FakeOptions = {}) {
     windowsRemoved: [] as number[],
     windowsUpdated: [] as { id: number; opts: Record<string, unknown> }[],
     tabsCreated: [] as Record<string, unknown>[],
+    tabsUpdated: [] as { tabId: number; opts: Record<string, unknown> }[],
     tabsRemoved: [] as number[],
     scripts: [] as Record<string, unknown>[],
     /** Whatever the popup ended up being, window or fallback tab. */
@@ -100,6 +111,7 @@ function fakeApi(opts: FakeOptions = {}) {
         const tabId = nextId++
         log.tabIds.push(tabId)
         windowTabs.set(id, tabId)
+        tabUrls.set(tabId, String(options.url ?? ''))
         // Safari answers without the documented `tabs` array; the window and its
         // tab both exist, `create` just does not say so.
         return Promise.resolve(opts.omitCreatedTabs ? { id } : { id, tabs: [{ id: tabId }] })
@@ -120,9 +132,22 @@ function fakeApi(opts: FakeOptions = {}) {
         // The onboarding tab is not a popup; the fallback tab is, and both are
         // now created active, so the URL is what tells them apart.
         if (!String(options.url ?? '').includes('onboarding')) log.tabIds.push(id)
+        tabUrls.set(id, String(options.url ?? ''))
         return Promise.resolve({ id })
       },
-      get: () => Promise.resolve({ status: opts.tabNeverComplete ? 'loading' : 'complete' }),
+      update(tabId, options) {
+        log.tabsUpdated.push({ tabId, opts: options })
+        if (opts.tabsUpdateFails) return Promise.reject(new Error('cannot navigate'))
+        if (!opts.stallNavigation && typeof options.url === 'string') {
+          tabUrls.set(tabId, options.url)
+        }
+        return Promise.resolve({ id: tabId, url: tabUrls.get(tabId) })
+      },
+      get: (tabId) =>
+        Promise.resolve({
+          status: opts.tabNeverComplete ? 'loading' : 'complete',
+          url: tabUrls.get(tabId),
+        }),
       query: (info) => {
         const id = (info as { windowId?: number }).windowId
         const tabId = id == null ? undefined : windowTabs.get(id)
@@ -163,6 +188,8 @@ function fakeApi(opts: FakeOptions = {}) {
     log,
     /** The user closing the popup. */
     closeTab: (tabId: number) => closeListeners.forEach((fn) => fn(tabId)),
+    /** A navigation the fake was told to stall finally committing. */
+    navigateTab: (tabId: number, url: string) => tabUrls.set(tabId, url),
     /** The popup reporting progress — a navigation committing, or finishing. */
     updateTab: (tabId: number, status: string) =>
       [...updateListeners].forEach((fn) => fn(tabId, { status })),
@@ -185,7 +212,7 @@ function fakeFetch(body: Uint8Array, init: { ok?: boolean; status?: number; type
 
 function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
   const timers = fakeTimers()
-  const { api, log, closeTab, updateTab, setOnArm } = fakeApi(opts)
+  const { api, log, closeTab, updateTab, navigateTab, setOnArm } = fakeApi(opts)
   // Kept off the timer seam on purpose: a 20 s heartbeat sharing `schedule` would
   // show up in every TTL assertion in this file.
   const keepAlive: boolean[] = []
@@ -195,7 +222,7 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
     fetchImpl: fetchImpl ?? (fakeFetch(new Uint8Array([1, 2, 3])) as unknown as typeof fetch),
     version: '0.1.0',
     ttlMs: 60_000,
-    loadTimeoutMs: 10,
+    loadTimeoutMs: opts.loadTimeoutMs ?? 10,
     settleMs: 10,
     newId: () => `s${++n}`,
     schedule: timers.schedule,
@@ -213,7 +240,14 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
       })
     })
   }
-  return { router, log, timers, keepAlive, closeTab, updateTab }
+  return { router, log, timers, keepAlive, closeTab, updateTab, navigateTab }
+}
+
+const LOADING_PAGE = 'chrome-extension://dripd/loading.html'
+
+/** Spin the microtask queue far enough for the router to have parked. */
+async function settleMicrotasks(): Promise<void> {
+  for (let i = 0; i < 200; i++) await Promise.resolve()
 }
 
 /** Every `executeScript` that put the loading scrim up. */
@@ -271,7 +305,8 @@ describe('harvest', () => {
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
     expect(reply).toMatchObject({ ok: true, sessionId: 's1', harvest: HARVEST })
-    expect(log.windowsCreated[0]).toMatchObject({ type: 'popup', focused: true, url: PDP })
+    // Which URL it opens on is its own test now; this one is about the window.
+    expect(log.windowsCreated[0]).toMatchObject({ type: 'popup', focused: true })
     // The page has not ranked yet — closing here would leave nothing to recover with.
     expect(log.windowsRemoved).toEqual([])
     expect(router.sessionCount()).toBe(1)
@@ -641,36 +676,34 @@ describe('session TTL', () => {
  * cover down.
  */
 describe('the loading scrim', () => {
-  it('covers the popup before anything is injected into the retailer page', async () => {
+  it('covers the retailer document before the viewfinder bundle goes in', async () => {
+    // The popup's own first paint is the loading page, not this — injecting a
+    // cover into our own page would cover a spinner with a spinner. This is the
+    // cover on the retailer's document, on its way to the viewfinder.
     const { router, log } = build()
     await startSession(router)
 
     const bundleAt = injectedBundleAt(log.scripts)
     expect(bundleAt).toBeGreaterThan(0)
-    expect(String(log.scripts[0]!.func ?? '')).toContain(LOADING_HOST_ID)
-  })
-
-  it('covers it again once the retailer page has settled', async () => {
-    // The first injection can land on the popup's about:blank and be thrown away
-    // when the navigation commits. This one cannot: it runs after the load wait,
-    // on the document the viewfinder is about to mount into.
-    const { router, log } = build()
-    await startSession(router)
-
-    const bundleAt = injectedBundleAt(log.scripts)
-    expect(scrimInjections(log.scripts.slice(0, bundleAt))).toBeGreaterThanOrEqual(2)
+    expect(scrimInjections(log.scripts.slice(0, bundleAt))).toBeGreaterThanOrEqual(1)
   })
 
   it('re-covers the page every time the loading popup reports progress', async () => {
-    const { router, log, updateTab } = build({ tabNeverComplete: true })
+    // Held mid-load, which is the whole window this is about: the retailer's
+    // document exists and is painting, and the viewfinder is still minutes of
+    // page-load away.
+    const { router, log, updateTab } = build({ tabNeverComplete: true, loadTimeoutMs: 5_000 })
     void router.handle({ kind: 'harvest', url: PDP })
-    for (let i = 0; i < 50 && log.scripts.length === 0; i++) await Promise.resolve()
+    await settleMicrotasks()
 
-    const before = scrimInjections(log.scripts)
+    // Nothing yet: the popup is showing our own loading page, which needs no
+    // cover — covering it would be a spinner over a spinner.
+    expect(scrimInjections(log.scripts)).toBe(0)
+
     updateTab(log.tabIds[0]!, 'loading')
-    await Promise.resolve()
+    await settleMicrotasks()
 
-    expect(scrimInjections(log.scripts)).toBe(before + 1)
+    expect(scrimInjections(log.scripts)).toBe(1)
   })
 
   it('stops re-covering once the viewfinder is up, so it cannot cover that', async () => {
@@ -692,5 +725,72 @@ describe('the loading scrim', () => {
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
     expect(reply.ok).toBe(true)
+  })
+})
+
+/**
+ * What the popup shows in its first moment.
+ *
+ * Pointing the window at the retailer means there is no document until that
+ * server answers, and nothing can be injected into a tab that has none — so on a
+ * slow shop the cover arrived late and the user watched the browser's blank page
+ * instead. Opening on a page of our own inverts it: the window paints from disk,
+ * and the retailer starts loading behind something rather than in front of
+ * nothing.
+ */
+describe('opening the popup', () => {
+  it('opens the window on our own page, not on the retailer', async () => {
+    const { router, log } = build()
+    await startSession(router)
+
+    expect(log.windowsCreated[0]!.url).toBe(LOADING_PAGE)
+  })
+
+  it('sends the same tab on to the retailer once the window exists', async () => {
+    const { router, log } = build()
+    await startSession(router)
+
+    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+  })
+
+  it('opens the fallback tab on our own page too', async () => {
+    // Every popup attempt failing drops to a plain tab. It is the same window to
+    // the user, so it gets the same first paint.
+    const { router, log } = build({ windowCreateFailures: 3 })
+    await startSession(router)
+
+    expect(log.tabsCreated[0]!.url).toBe(LOADING_PAGE)
+    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+  })
+
+  it('does not take our loading page finishing for the retailer finishing', async () => {
+    // The load wait settled on the first `complete` it saw. That is now ours, and
+    // treating it as the retailer's would inject the harvester into the
+    // extension's own spinner and harvest it.
+    const { router, log, navigateTab, updateTab } = build({
+      stallNavigation: true,
+      loadTimeoutMs: 5_000,
+    })
+    void router.handle({ kind: 'harvest', url: PDP })
+    await settleMicrotasks()
+
+    expect(injectedBundleAt(log.scripts)).toBe(-1)
+
+    navigateTab(log.tabIds[0]!, PDP)
+    updateTab(log.tabIds[0]!, 'complete')
+    await settleMicrotasks()
+
+    expect(injectedBundleAt(log.scripts)).toBeGreaterThanOrEqual(0)
+  })
+
+  it('gives up the capture when the popup cannot be sent to the retailer', async () => {
+    // A popup stuck on our loading page has nothing to harvest. Failing here is
+    // what stops it being discovered as an empty harvest of our own spinner.
+    const { router, log } = build({ tabsUpdateFails: true })
+    const reply = await router.handle({ kind: 'harvest', url: PDP })
+
+    expect(reply.ok).toBe(false)
+    expect(injectedBundleAt(log.scripts)).toBe(-1)
+    expect(log.windowsRemoved.length + log.tabsRemoved.length).toBeGreaterThan(0)
   })
 })

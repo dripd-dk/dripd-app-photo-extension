@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="da">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dripd</title>
+    <!--
+      The popup's first paint.
+
+      The window used to open pointed straight at the retailer, which meant there
+      was no document until that server answered — and nothing can be injected
+      into a tab that has none. On a slow shop the user watched the browser's own
+      blank page for a second or two before any sign of life. This page is read
+      from disk with no network involved, so it paints as fast as the window
+      appears; the retailer is navigated to afterwards, behind it.
+
+      DELIBERATELY IDENTICAL to `showLoadingScrim` in `src/router.ts`, which takes
+      over the moment the retailer's document replaces this one. Same background,
+      same ring, same words, same spacing — the handover between them has to be
+      invisible, and it stops being invisible the moment someone improves one of
+      the two. Change both or neither.
+
+      No scripting at all: MV3's extension-page CSP forbids inline script, and a
+      page that needs none cannot be broken by it. `tests/build-output.test.ts`
+      holds that line by grepping the built page for a script tag — which is why
+      this comment does not spell one out.
+
+      No web font either. The injected half lives on the retailer's page, where
+      the extension's self-hosted serif is not reachable without making it a
+      web-accessible resource — so both sides use the system UI stack and match.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #faf8f5;
+        font:
+          600 14px/1.45 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          system-ui,
+          sans-serif;
+        color: #5c574e;
+      }
+      .ring {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        border: 3px solid #eae6df;
+        border-top-color: #059669;
+        animation: dripd-spin 0.8s linear infinite;
+      }
+      @keyframes dripd-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .ring {
+          animation-duration: 2.4s;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ring"></div>
+    <div>Gør rammen klar…</div>
+  </body>
+</html>

@@ -70,6 +70,16 @@ const POPUP_HEIGHT = 960
 const MAX_BYTES = 20 * 1024 * 1024
 /** Comfortably inside Chromium's ~30 s idle-termination window. */
 const KEEPALIVE_MS = 20_000
+/**
+ * The page the popup opens on.
+ *
+ * Pointing the window straight at the retailer meant there was no document until
+ * that server answered, and nothing can be injected into a tab that has none — so
+ * on a slow shop the cover landed late and the user watched the browser's own
+ * blank page. This is read from disk, so it paints as fast as the window appears,
+ * and the retailer is navigated to afterwards.
+ */
+const LOADING_PAGE = 'loading.html'
 
 export interface TabInfo {
   id?: number
@@ -99,6 +109,8 @@ export interface BrowserLike {
   tabs: {
     create(opts: Record<string, unknown>): Promise<TabInfo>
     get(tabId: number): Promise<TabInfo>
+    /** Sends the popup on from our loading page to the retailer. */
+    update(tabId: number, opts: Record<string, unknown>): Promise<TabInfo>
     /** The authority on which tabs a window owns. `windows.create` is not. */
     query(info: Record<string, unknown>): Promise<TabInfo[]>
     remove(tabId: number): Promise<void>
@@ -473,9 +485,26 @@ export function createRouter(deps: RouterDeps): Router {
     return null
   }
 
-  /** Resolve when the tab reports `complete`, or when the budget runs out —
-   *  a slow page still gets harvested, it just gets harvested early. */
-  function waitForLoad(tabId: number): Promise<void> {
+  /** Is the tab showing the page we are waiting for, or still our own? */
+  function isOnOrigin(url: string | undefined, origin: string): boolean {
+    if (!url) return false
+    try {
+      return new URL(url).origin === origin
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Resolve when the tab reports `complete` **on the retailer's origin**, or when
+   * the budget runs out — a slow page still gets harvested, it just gets
+   * harvested early.
+   *
+   * The origin check is not a refinement. The popup now opens on the extension's
+   * own loading page, which reaches `complete` first every single time; settling
+   * on that would inject the harvester into our own spinner and harvest it.
+   */
+  function waitForLoad(tabId: number, origin: string): Promise<void> {
     return new Promise<void>((resolve) => {
       let settled = false
       let timer: unknown = null
@@ -492,22 +521,27 @@ export function createRouter(deps: RouterDeps): Router {
         resolve()
       }
 
+      // `complete` says a document finished; only the tab's URL says which one.
+      const checkTab = () => {
+        api.tabs
+          .get(tabId)
+          .then((tab) => {
+            if (tab?.status === 'complete' && isOnOrigin(tab.url, origin)) finish()
+          })
+          .catch(() => {
+            /* the tab may be mid-navigation; the listener still covers us */
+          })
+      }
+
       const listener = (id: number, info: { status?: string }) => {
-        if (id === tabId && info.status === 'complete') finish()
+        if (id === tabId && info.status === 'complete') checkTab()
       }
 
       api.tabs.onUpdated.addListener(listener)
       timer = schedule(finish, loadTimeoutMs)
 
       // The tab can reach `complete` before the listener is attached.
-      api.tabs
-        .get(tabId)
-        .then((tab) => {
-          if (tab?.status === 'complete') finish()
-        })
-        .catch(() => {
-          /* the tab may be mid-navigation; the listener still covers us */
-        })
+      checkTab()
     })
   }
 
@@ -533,7 +567,7 @@ export function createRouter(deps: RouterDeps): Router {
       return { ok: false, error: ERR.needsPermission }
     }
 
-    const opened = await openPopup(target.href)
+    const opened = await openPopup(api.runtime.getURL(LOADING_PAGE))
     if (!opened) return { ok: false, error: ERR.openFailed }
 
     const session: Session = {
@@ -552,10 +586,10 @@ export function createRouter(deps: RouterDeps): Router {
     syncKeepAlive()
 
     /**
-     * Re-covering matters as much as covering: the first injection can land on
-     * the popup's about:blank and be discarded the moment the navigation
-     * commits, and a page that renders progressively is visible long before it
-     * reports `complete`. Every progress report is another chance to cover it.
+     * The loading page covers the popup until the retailer's document replaces
+     * it; from there this covers the retailer's own document. A page that
+     * renders progressively is visible long before it reports `complete`, so
+     * every progress report is another chance to cover it.
      */
     const cover = () => {
       void api.scripting
@@ -577,10 +611,14 @@ export function createRouter(deps: RouterDeps): Router {
       }
     }
     api.tabs.onUpdated.addListener(onProgress)
-    cover()
 
     try {
-      await waitForLoad(opened.tabId)
+      // Only now does the retailer start loading, behind a page that is already
+      // on screen rather than in front of nothing. A tab we cannot navigate is
+      // a popup stuck on our spinner with nothing to harvest, so a failure here
+      // ends the capture instead of being discovered later as an empty one.
+      await api.tabs.update(opened.tabId, { url: target.href })
+      await waitForLoad(opened.tabId, target.origin)
       await wait(settleMs)
       // What that tab is ACTUALLY showing before we inject into it. If this is
       // not the retailer, everything downstream is aimed at the wrong page and

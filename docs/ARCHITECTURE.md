@@ -91,20 +91,44 @@ of the retailer's own page: the load has to finish, `settleMs` has to pass, a
 consent wall has to be dismissed, and only then can the overlay mount. Shown
 bare, that reads as a window that opened and did nothing.
 
-So the popup is covered. `showLoadingScrim` in `router.ts` is injected the moment
-the window exists and again on every `tabs.onUpdated` for that tab — the first
-injection can land on the popup's `about:blank` and be discarded when the
-navigation commits, and a page that renders progressively is visible long before
-it reports `complete`. Listening stops just before `injected.js` goes in, and one
-last cover is injected there, on the document the viewfinder will mount into.
+Covering it takes two halves, because one of them cannot start early enough.
 
-`mountFrameOverlay` takes it down, in that same document, in the same turn it
-builds the overlay — a signal from the background context would leave a frame in
-which the page is bare. The id is a literal in `router.ts` because the function
-is serialised into the page and cannot close over an import; `frame.ts` exports
-it as `LOADING_HOST_ID` and the router tests match against that, so the two
-cannot drift. A 20 s self-removal inside the cover is the valve: every path that
-ends a capture closes the window, and if one ever does not, showing the page
+**The popup opens on `loading.html`, not on the retailer.** Pointing the window
+at the shop means there is no document until that server answers, and nothing
+can be injected into a tab that has none — so the cover arrived exactly as late
+as the retailer was slow, which on a slow retailer is the whole problem. Our own
+page is read from disk, paints as fast as the window appears, and only then does
+`tabs.update` send the tab on to the retailer. The page loads behind something
+rather than in front of nothing.
+
+That inversion has a sharp edge: `waitForLoad` used to settle on the first
+`complete` it saw, and the first `complete` is now always ours. It takes the
+retailer's origin and settles only on a `complete` whose tab URL is on it —
+otherwise the harvester is injected into the extension's own spinner and
+harvests it. A tab that cannot be navigated ends the capture rather than being
+discovered later as an empty harvest of that spinner.
+
+**`showLoadingScrim` covers the retailer's document**, from the moment it
+replaces the loading page. It is injected on every `tabs.onUpdated` for that tab,
+because a page that renders progressively is visible long before it reports
+`complete`, and once more just before `injected.js` — on the document the
+viewfinder will mount into. Listening stops first, so nothing can put a cover
+back over the viewfinder itself. Nothing covers `loading.html`: it *is* the
+cover.
+
+The two halves are drawn to be pixel-identical, so the handover between them is
+invisible. They are also two separate pieces of code with no shared stylesheet —
+the injected half lives on the retailer's page, where the extension's own fonts
+are not reachable without making them web-accessible resources — so improving one
+alone is what makes the seam show. Change both or neither.
+
+`mountFrameOverlay` takes the cover down, in that same document, in the same turn
+it builds the overlay; a signal from the background context would leave a frame
+in which the page is bare. The id is a literal in `router.ts` because the
+function is serialised into the page and cannot close over an import; `frame.ts`
+exports it as `LOADING_HOST_ID` and the router tests match against that, so the
+two cannot drift. A 20 s self-removal inside the cover is the valve — every path
+that ends a capture closes the window, and if one ever does not, showing the page
 beats trapping the user behind an opaque panel.
 
 ## Security
@@ -145,11 +169,12 @@ is worthless after a restart.
 | `src/injected/consent.ts` | Reject a cookie wall. Never accepts |
 | `src/injected/frame.ts` | The viewfinder, and what counts as framed |
 | `src/injected/index.ts` | Installs `__dripdHarvest` in the isolated world |
+| `src/loading.html` | The popup's first paint, before the retailer loads |
 | `src/permissions.ts` + `onboarding.*` | The one-time host grant |
 
 ## Tests
 
-92 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+98 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `consent` / `key` / `frame` — pure functions over a happy-dom DOM. The
@@ -172,12 +197,18 @@ against a stale `dist/`.
   direction bug the first time.
 - `injected-bundle` — evaluates the built `dist/injected.js` the way the browser
   does, catching a bundle that imports something the build left out.
-- the loading cover — that it goes up before anything else is injected, goes up
-  again on every progress report, stops once the viewfinder is armed (or it
-  would cover that), and that a cover the popup rejects still leaves a working
-  capture. `tabNeverComplete` holds the popup in `loading` so the window this is
-  all about can actually be driven; the default fake answers `tabs.get` with
-  `complete` and skips straight past it.
+- the loading cover — that the window opens on our own page and is navigated on
+  from there, that our page finishing is not mistaken for the retailer
+  finishing, that the retailer's document is covered on every progress report,
+  that covering stops once the viewfinder is armed (or it would cover that), and
+  that a cover the popup rejects still leaves a working capture. The fake's tabs
+  carry a URL for this: `tabNeverComplete` holds the popup mid-load and
+  `stallNavigation` holds it on our page, because the default answers `tabs.get`
+  with `complete` and skips straight past the window this is all about.
+- `build-output` — that `dist/loading.html` exists and carries no script. The
+  router names that page as a string through `runtime.getURL`; nothing else in
+  the repo connects the string to a file, so a build that stopped copying it
+  would pass everything else and open every capture on a blank error page.
 
 What tests cannot cover is the thing most likely to break: whether an
 extension-driven popup on a bot-managed product page behaves like a hand-typed

@@ -191,7 +191,7 @@ carries both forms and each build drops the one its browser doesn't want.
 ```bash
 npm run build:dev           # also matches localhost:3000, for working on dripd itself
 npm run build:firefox:dev   # the same, for Firefox
-npm test                    # 92 tests, no browser required
+npm test                    # 98 tests, no browser required
 npm run typecheck
 ```
 

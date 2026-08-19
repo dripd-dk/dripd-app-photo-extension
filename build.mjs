@@ -83,6 +83,9 @@ if (target === 'chrome') {
 
 await writeFile(resolve(outdir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 await cp(resolve(root, 'src/onboarding.html'), resolve(outdir, 'onboarding.html'))
+// The popup's first paint. Copied rather than bundled because it is markup and
+// CSS only — MV3 forbids inline script on an extension page, so it has none.
+await cp(resolve(root, 'src/loading.html'), resolve(outdir, 'loading.html'))
 // Self-hosted so the grant page renders in dripd's own serif rather than a
 // Georgia fallback. Bundled rather than fetched: a store reviewer reading this
 // manifest should find no network access at all, and there is none.
