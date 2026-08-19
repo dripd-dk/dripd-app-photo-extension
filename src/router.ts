@@ -177,12 +177,22 @@ interface Session {
    * second tab means the visible tab is never navigated at all.
    */
   loadingTabId: number | null
+  /**
+   * The studio tab that asked for this capture, and its window.
+   *
+   * Not searched for — taken from the sender. `harvest` arrives through
+   * `bridge.content.ts`, which relays it with `runtime.sendMessage` from the
+   * dripd.dk tab, so the tab that asked is the tab that sent. That matters with
+   * more than one dripd tab open: guessing would land the user in the wrong one.
+   */
+  originTabId: number | null
+  originWindowId: number | null
   timer: unknown
 }
 
-/** Who sent a message. Only `ready` cares, and only about the tab. */
+/** Who sent a message: the tab it came from, and that tab's window. */
 export interface MessageSender {
-  tab?: { id?: number }
+  tab?: { id?: number; windowId?: number }
 }
 
 /** A `harvest` parked on a human. */
@@ -527,7 +537,7 @@ export function createRouter(deps: RouterDeps): Router {
     })
   }
 
-  async function harvest(rawUrl: unknown): Promise<Reply> {
+  async function harvest(rawUrl: unknown, sender?: MessageSender): Promise<Reply> {
     const target = safeHttpsUrl(rawUrl)
     if (!target) return { ok: false, error: ERR.badUrl }
 
@@ -562,6 +572,8 @@ export function createRouter(deps: RouterDeps): Router {
       // showing our loading page and there is nothing to capture in.
       tabId: null,
       loadingTabId: opened.tabId,
+      originTabId: sender?.tab?.id ?? null,
+      originWindowId: sender?.tab?.windowId ?? null,
       timer: null,
     }
 
@@ -742,6 +754,7 @@ export function createRouter(deps: RouterDeps): Router {
 
     if (action === 'dismiss') {
       await closeWindow(session)
+      await returnToStudio(session)
       return { ok: true }
     }
 
@@ -790,6 +803,41 @@ export function createRouter(deps: RouterDeps): Router {
     return { ok: false, error: ERR.noSession }
   }
 
+  /**
+   * Put the user back in the studio.
+   *
+   * Closing the popup left them wherever the window manager decided, which is
+   * not necessarily where they came from — so a finished capture ended with the
+   * images sitting in a tab they had to go and find.
+   *
+   * Dismiss only. The other ways a capture ends are a five-minute frame timeout,
+   * the user closing the popup themselves, and an error; in the first two they
+   * are deliberately somewhere else by then, and pulling focus minutes later is
+   * worse than not doing it. `surface` is excluded for a sharper reason — it
+   * exists to put the retailer window in front of the user, and this would undo
+   * exactly that.
+   *
+   * The tab first, then its window, so the window comes forward already showing
+   * the right one.
+   */
+  async function returnToStudio(session: Session): Promise<void> {
+    const { originTabId, originWindowId } = session
+    if (originTabId != null) {
+      try {
+        await api.tabs.update(originTabId, { active: true })
+      } catch (e) {
+        log('could not return to the studio tab', e)
+      }
+    }
+    if (originWindowId != null) {
+      try {
+        await api.windows.update(originWindowId, { focused: true })
+      } catch (e) {
+        log('could not focus the studio window', e)
+      }
+    }
+  }
+
   /** Show the retailer's tab and drop the loading one. Once per session. */
   async function revealCaptureTab(session: Session): Promise<void> {
     const loadingTabId = session.loadingTabId
@@ -817,7 +865,7 @@ export function createRouter(deps: RouterDeps): Router {
       case 'ping':
         return { ok: true, version }
       case 'harvest':
-        return harvest((req as { url?: unknown }).url)
+        return harvest((req as { url?: unknown }).url, sender)
       case 'fetchBytes':
         return fetchBytes((req as { sessionId?: unknown }).sessionId, (req as { url?: unknown }).url)
       case 'resolve':

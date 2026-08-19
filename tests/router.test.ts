@@ -66,6 +66,8 @@ interface FakeOptions {
   captureTabFails?: boolean
   /** Reject the `document_start` registration. */
   registerFails?: boolean
+  /** The studio's tab is gone by the time the capture ends. */
+  studioTabGone?: boolean
   /**
    * The popup's tab starts in `loading`, as a real one does.
    *
@@ -157,6 +159,9 @@ function fakeApi(opts: FakeOptions = {}) {
       },
       update(tabId, options) {
         log.tabsUpdated.push({ tabId, opts: options })
+        if (opts.studioTabGone && tabId === STUDIO.tab.id) {
+          return Promise.reject(new Error('no tab with id'))
+        }
         if (!opts.stallNavigation && typeof options.url === 'string') {
           tabUrls.set(tabId, options.url)
           // A navigation onto a registered origin is what actually runs the
@@ -287,6 +292,11 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
 
 const LOADING_PAGE = 'chrome-extension://dripd/loading.html'
 
+/** The studio's own tab, which is where every `harvest` comes from: the bridge
+ *  content script relays it with `runtime.sendMessage`, so the sender is the
+ *  dripd.dk tab that asked. Nothing has to go looking for it. */
+const STUDIO = { tab: { id: 900, windowId: 800 } }
+
 /** The `tabs.update` calls that actually sent a tab somewhere. The rest are the
  *  swap making the retailer's tab the visible one. */
 function navigations(log: { tabsUpdated: { tabId: number; opts: Record<string, unknown> }[] }) {
@@ -314,7 +324,7 @@ async function untilFraming(router: Router): Promise<void> {
 
 /** Harvest once and hand back the session id. Every session test starts here. */
 async function startSession(router: Router): Promise<string> {
-  const reply = await router.handle({ kind: 'harvest', url: PDP })
+  const reply = await router.handle({ kind: 'harvest', url: PDP }, STUDIO)
   if (!reply.ok) throw new Error(`harvest failed: ${(reply as { error: string }).error}`)
   return String(reply.sessionId)
 }
@@ -887,5 +897,75 @@ describe('the document_start registration', () => {
 
     expect(reply.ok).toBe(false)
     expect(log.tabsCreated).toEqual([])
+  })
+})
+
+/**
+ * Where the user ends up when the capture is over.
+ *
+ * The popup closing left them wherever the window manager decided, which on
+ * Safari was not the studio — so a finished capture ended with the images
+ * sitting in a tab they had to go and find.
+ */
+describe('returning to the studio', () => {
+  it('activates the tab the harvest was asked for, once the popup is dismissed', async () => {
+    const { router, log } = build()
+    const sessionId = await startSession(router)
+
+    await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
+
+    expect(log.tabsUpdated).toContainEqual({ tabId: 900, opts: { active: true } })
+  })
+
+  it('focuses the window that tab is in', async () => {
+    const { router, log } = build()
+    const sessionId = await startSession(router)
+
+    await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
+
+    expect(log.windowsUpdated).toContainEqual({ id: 800, opts: { focused: true } })
+  })
+
+  it('leaves the user where they are on surface', async () => {
+    // The empty path surfaces the retailer window so the user can clear a
+    // consent wall and try again. Pulling them back to the studio would undo
+    // the one thing that action exists to do.
+    const { router, log } = build()
+    const sessionId = await startSession(router)
+
+    await router.handle({ kind: 'resolve', sessionId, action: 'surface' })
+
+    expect(log.tabsUpdated).not.toContainEqual({ tabId: 900, opts: { active: true } })
+  })
+
+  it('does not steal focus when a session expires', async () => {
+    // Minutes may have passed and the user is deliberately elsewhere.
+    const { router, log, timers } = build()
+    await startSession(router)
+
+    timers.fireAll()
+    await settleMicrotasks()
+
+    expect(log.tabsUpdated).not.toContainEqual({ tabId: 900, opts: { active: true } })
+  })
+
+  it('finishes the dismiss even if the studio tab has been closed', async () => {
+    const { router } = build({ studioTabGone: true })
+    const sessionId = await startSession(router)
+
+    const reply = await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
+
+    expect(reply.ok).toBe(true)
+  })
+
+  it('has nothing to go back to when the harvest came from no tab', async () => {
+    const { router, log } = build()
+    const reply = await router.handle({ kind: 'harvest', url: PDP })
+    const sessionId = String((reply as { sessionId?: unknown }).sessionId)
+
+    await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
+
+    // The popup gets focused on the way up; nothing else should be.
+    expect(log.windowsUpdated).not.toContainEqual({ id: 800, opts: { focused: true } })
   })
 })

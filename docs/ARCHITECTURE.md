@@ -19,7 +19,7 @@ Everything else here is a consequence of that.
 | `ready` | **Bundle only:** which capture, if any, owns my tab |
 | `harvest(url)` | Opens the popup, **waits for the user to frame a photo**, leaves it open |
 | `fetchBytes(sessionId, url)` | Fetches in that session; **extends its TTL** |
-| `resolve(sessionId, action)` | **Window only:** closes or surfaces it |
+| `resolve(sessionId, action)` | **Window only:** closes or surfaces it. `dismiss` also returns the user to the studio tab that asked |
 | `framed(sessionId, …)` | Sent by the injected overlay. Settles `harvest` |
 
 `resolve` closes the *window*, not the *session*. The page ranks the harvest
@@ -185,6 +185,23 @@ redirect or a soft navigation on the retailer's own initiative loses the
 viewfinder exactly the same way. Removing our own click removes the cause we
 were creating, not the class.
 
+## Where the user ends up
+
+Closing the popup left the user wherever the window manager decided, which on
+Safari was not the studio — a finished capture ended with the images sitting in a
+tab they had to go and find.
+
+The studio tab is not searched for. `harvest` arrives through
+`bridge.content.ts`, which relays it with `runtime.sendMessage` from the dripd.dk
+page, so the tab that asked *is* the tab that sent: `sender.tab` names it exactly.
+That matters with more than one dripd tab open, where a search would be a guess.
+
+Only `dismiss` returns focus. The other endings are a five-minute frame timeout,
+the user closing the popup themselves, and an error — in the first two they are
+deliberately somewhere else by then. `surface` is excluded for a sharper reason:
+it exists to put the retailer window in front of the user, and returning focus
+would undo exactly that.
+
 ## Security
 
 The extension is functionally a CORS-bypass proxy holding the user's cookies. The
@@ -228,7 +245,7 @@ is worthless after a restart.
 
 ## Tests
 
-109 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+115 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `key` / `frame` — pure functions over a happy-dom DOM. The
