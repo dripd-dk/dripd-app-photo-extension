@@ -37,6 +37,7 @@
 		B489CB913030A71500730CFD /* fonts in Resources */ = {isa = PBXBuildFile; fileRef = B489CB893030A71500730CFD /* fonts */; };
 		B489CB923030A71500730CFD /* sw.js in Resources */ = {isa = PBXBuildFile; fileRef = B489CB8A3030A71500730CFD /* sw.js */; };
 		B489CB933030A71500730CFD /* onboarding.html in Resources */ = {isa = PBXBuildFile; fileRef = B489CB8B3030A71500730CFD /* onboarding.html */; };
+		B489CBFE3030A71500730CFD /* loading.html in Resources */ = {isa = PBXBuildFile; fileRef = B489CBFF3030A71500730CFD /* loading.html */; };
 		B489CB943030A71500730CFD /* onboarding.js in Resources */ = {isa = PBXBuildFile; fileRef = B489CB843030A71500730CFD /* onboarding.js */; };
 		B489CB953030A71500730CFD /* bridge.js in Resources */ = {isa = PBXBuildFile; fileRef = B489CB853030A71500730CFD /* bridge.js */; };
 		B489CB963030A71500730CFD /* injected.js in Resources */ = {isa = PBXBuildFile; fileRef = B489CB863030A71500730CFD /* injected.js */; };
@@ -45,6 +46,7 @@
 		B489CB993030A71500730CFD /* fonts in Resources */ = {isa = PBXBuildFile; fileRef = B489CB893030A71500730CFD /* fonts */; };
 		B489CB9A3030A71500730CFD /* sw.js in Resources */ = {isa = PBXBuildFile; fileRef = B489CB8A3030A71500730CFD /* sw.js */; };
 		B489CB9B3030A71500730CFD /* onboarding.html in Resources */ = {isa = PBXBuildFile; fileRef = B489CB8B3030A71500730CFD /* onboarding.html */; };
+		B489CBFD3030A71500730CFD /* loading.html in Resources */ = {isa = PBXBuildFile; fileRef = B489CBFF3030A71500730CFD /* loading.html */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -119,6 +121,7 @@
 		B489CB893030A71500730CFD /* fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = fonts; path = ../../../dist/fonts; sourceTree = "<group>"; };
 		B489CB8A3030A71500730CFD /* sw.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = sw.js; path = ../../../dist/sw.js; sourceTree = "<group>"; };
 		B489CB8B3030A71500730CFD /* onboarding.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = onboarding.html; path = ../../../dist/onboarding.html; sourceTree = "<group>"; };
+		B489CBFF3030A71500730CFD /* loading.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = loading.html; path = ../../../dist/loading.html; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -256,6 +259,7 @@
 				B489CB893030A71500730CFD /* fonts */,
 				B489CB8A3030A71500730CFD /* sw.js */,
 				B489CB8B3030A71500730CFD /* onboarding.html */,
+				B489CBFF3030A71500730CFD /* loading.html */,
 			);
 			name = Resources;
 			path = "Shared (Extension)";
@@ -428,6 +432,7 @@
 				B489CB993030A71500730CFD /* fonts in Resources */,
 				B489CB963030A71500730CFD /* injected.js in Resources */,
 				B489CB9B3030A71500730CFD /* onboarding.html in Resources */,
+				B489CBFD3030A71500730CFD /* loading.html in Resources */,
 				B489CB9A3030A71500730CFD /* sw.js in Resources */,
 				B489CB953030A71500730CFD /* bridge.js in Resources */,
 			);
@@ -443,6 +448,7 @@
 				B489CB913030A71500730CFD /* fonts in Resources */,
 				B489CB8E3030A71500730CFD /* injected.js in Resources */,
 				B489CB933030A71500730CFD /* onboarding.html in Resources */,
+				B489CBFE3030A71500730CFD /* loading.html in Resources */,
 				B489CB923030A71500730CFD /* sw.js in Resources */,
 				B489CB8D3030A71500730CFD /* bridge.js in Resources */,
 			);

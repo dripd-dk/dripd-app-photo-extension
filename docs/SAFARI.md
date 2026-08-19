@@ -21,6 +21,21 @@ rather than keeping its own copy, so there is exactly one build of the extension
 the Safari app cannot silently ship a stale one. `dist/` is git-ignored, so a fresh
 clone has to build before Xcode will succeed.
 
+**But it references dist file by file, not as a folder.** A file added to the
+extension is *not* picked up: it simply will not be in the app bundle, Safari will
+404 on it at runtime, and nothing at build time says so. `loading.html` was added
+that way and shipped missing until it was noticed. Adding one by hand means six
+entries in `project.pbxproj` — a `PBXFileReference`, a `PBXBuildFile` per extension
+target (macOS and iOS), the group, and both `Resources` build phases — modelled on
+whatever `onboarding.html` does. Regenerating the wrapper is the alternative, and it
+destroys the signing team, the App Store plist and `LSApplicationCategoryType` with
+it, so for a single file the hand edit is the smaller risk. Check afterwards:
+
+```bash
+ls "…/dripd photo.app/Contents/PlugIns/dripd photo Extension.appex/Contents/Resources/"
+# every file in dist/ should be there
+```
+
 From the command line, signed with the dripd team:
 
 ```bash
@@ -83,6 +98,18 @@ cp -R ~/Library/Developer/Xcode/DerivedData/dripd_photo-*/Build/Products/Debug/"
 open "/Applications/dripd photo.app"
 pluginkit -m | grep dripd      # confirm before hunting through Safari's settings
 ```
+
+## Which build ends up inside it
+
+Whatever is in `dist/`, which is the **release** build — `https://dripd.dk/*` only.
+A Safari app built this way cannot see a dev server on `localhost:3000`, and the
+studio there will report the extension as absent.
+
+`npm run build:dev` writes to `dist-dev/` and deliberately does not touch `dist/`,
+so the wrapper never picks it up by accident. Testing Safari against a local studio
+therefore means pointing the wrapper at `dist-dev/` on purpose, which is a change
+worth making deliberately and reverting afterwards — the whole point of the three
+output directories is that a localhost build cannot leak into a store submission.
 
 ## Enable it in Safari
 
