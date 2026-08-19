@@ -316,6 +316,15 @@ an extension reload before it takes effect.
   `closeWindow` therefore removes the window **and** every tab it opened, each in
   its own `try` — on the engines where the window did take them, the first
   removal throws, and a shared catch would skip the rest.
+- **`tabs.create({ windowId })` does not put the tab in that window.** Observed on
+  Safari 26: the capture tab is created in a normal window instead, and removing
+  the loading tab then closes the popup, since that tab was all it had. So a
+  capture there *starts* as a popup window and then continues as a tab in the
+  main window. It works — framing, grabbing and dismissing all behave — but the
+  two-tab handover that removes Firefox's navigation flash is not doing anything
+  for Safari, which never showed that flash to begin with. Left alone
+  deliberately: the flow is correct on both, and the alternative is an
+  engine-specific branch through the most rewritten part of this extension.
 - Host access is granted in Safari's own Settings, per site. `permissions.request()`
   produces no prompt, so the grant page must show instructions rather than a button
   and watch for the grant instead of asking for it. That also creates a dead end —
