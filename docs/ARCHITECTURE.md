@@ -228,7 +228,7 @@ is worthless after a restart.
 
 ## Tests
 
-108 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+109 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `key` / `frame` — pure functions over a happy-dom DOM. The
@@ -284,12 +284,21 @@ permissions UI to switch on and the bridge silently never exists. Firefox also
 registers content scripts at extension-load time: granting a host afterwards needs
 an extension reload before it takes effect.
 
-**Safari** differs in two ways that both looked like our bugs:
+**Safari** differs in ways that all looked like our bugs:
 
 - `windows.create` resolves **without the documented `tabs` array**. Reading that
   absence as failure abandoned a good window and opened another, then fell through
   to a tab — two popups, and the injection landing somewhere that was never the
   retailer's page. `tabs.query({windowId})` is the authority; `create` is not.
+- **Teardown cannot assume a window takes its tabs with it.** The retailer loads
+  in a tab created with `tabs.create({ windowId })`, and an engine that already
+  resolves `windows.create` without its `tabs` array is not one to trust with
+  that either. A capture tab that was never in the popup outlives the popup, and
+  then pressing *Hent billeder* reads as doing nothing at all: the harvest lands
+  in the studio while the page the user is looking at just sits there.
+  `closeWindow` therefore removes the window **and** every tab it opened, each in
+  its own `try` — on the engines where the window did take them, the first
+  removal throws, and a shared catch would skip the rest.
 - Host access is granted in Safari's own Settings, per site. `permissions.request()`
   produces no prompt, so the grant page must show instructions rather than a button
   and watch for the grant instead of asking for it. That also creates a dead end —

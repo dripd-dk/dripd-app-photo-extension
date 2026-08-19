@@ -550,6 +550,22 @@ describe('resolve — the window, not the session', () => {
     ).resolves.toEqual({ ok: true })
   })
 
+  it('closes the capture tab as well as the window it should have been in', async () => {
+    // Safari. `tabs.create({ windowId })` is not something to take on trust from
+    // an engine that already resolves `windows.create` without its `tabs` array:
+    // if the capture tab was not put in the popup, removing the popup leaves it
+    // open, and pressing Hent billeder looks like it did nothing at all — the
+    // harvest arrives in the studio while the page the user is staring at just
+    // sits there.
+    const { router, log } = build()
+    const sessionId = await startSession(router)
+
+    await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
+
+    expect(log.windowsRemoved).toHaveLength(1)
+    expect(log.tabsRemoved).toContain(log.captureTabId)
+  })
+
   it('closes the tab when the fallback was a tab', async () => {
     const { router, log } = build({ windowCreateFailures: 2 })
     const sessionId = await startSession(router)

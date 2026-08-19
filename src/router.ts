@@ -334,17 +334,34 @@ export function createRouter(deps: RouterDeps): Router {
     } catch (e) {
       log('could not unregister', scriptId, e)
     }
-    try {
-      if (windowId != null) await api.windows.remove(windowId)
-      // The fallback path has no window of its own, so both tabs are ours to
-      // close — including the spinner, if the swap never happened.
-      else {
-        for (const id of [tabId, loadingTabId]) {
-          if (id != null) await api.tabs.remove(id)
-        }
+    if (windowId != null) {
+      try {
+        await api.windows.remove(windowId)
+      } catch {
+        /* already gone — the user may have closed it */
       }
-    } catch {
-      /* already gone — the user may have closed it */
+    }
+
+    // Every tab this capture opened, whether or not a window was supposed to
+    // take them with it.
+    //
+    // Removing the window is not enough on its own: Safari already resolves
+    // `windows.create` without its documented `tabs` array, and an engine that
+    // does that is not one to trust with `tabs.create({ windowId })` either. A
+    // capture tab that was never in the popup outlives it — and then pressing
+    // Hent billeder reads as doing nothing at all, because the harvest lands in
+    // the studio while the page the user is looking at just sits there.
+    //
+    // One `try` each rather than one around the loop: on the engines where the
+    // window did take its tabs, the first removal throws, and a shared catch
+    // would skip every removal after it.
+    for (const id of [tabId, loadingTabId]) {
+      if (id == null) continue
+      try {
+        await api.tabs.remove(id)
+      } catch {
+        /* the window took it, or the user closed it */
+      }
     }
   }
 
