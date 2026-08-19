@@ -3,5 +3,8 @@ dist/
 dist-dev/
 dist-firefox/
 *.zip
+# Unpacked builds. A zip extracted to be loaded as a temporary add-on lands
+# here, and every artifact this repo produces is named dripd-<target>-<what>.
+dripd-*/
 .DS_Store
 *.pkg
