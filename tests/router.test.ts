@@ -60,10 +60,10 @@ interface FakeOptions {
    * window in which the page is visible and the viewfinder is not.
    */
   tabNeverComplete?: boolean
-  /** Ignore `tabs.update`, so a test can drive the retailer navigation itself. */
+  /** Never run the retailer tab's bundle, so a test can drive the swap itself. */
   stallNavigation?: boolean
-  /** Reject the navigation off our loading page. */
-  tabsUpdateFails?: boolean
+  /** Reject the creation of the retailer's tab. */
+  captureTabFails?: boolean
   /** Reject the `document_start` registration. */
   registerFails?: boolean
   /**
@@ -106,6 +106,8 @@ function fakeApi(opts: FakeOptions = {}) {
     unregistered: [] as string[],
     /** Whatever the popup ended up being, window or fallback tab. */
     tabIds: [] as number[],
+    /** The tab the retailer was loaded into, behind the loading page. */
+    captureTabId: null as number | null,
   }
 
   const api: BrowserLike = {
@@ -140,17 +142,21 @@ function fakeApi(opts: FakeOptions = {}) {
     tabs: {
       create(options) {
         log.tabsCreated.push(options)
+        if (opts.captureTabFails) return Promise.reject(new Error('cannot create a tab'))
         const id = nextId++
+        const url = String(options.url ?? '')
         // The onboarding tab is not a popup; the fallback tab is, and both are
         // now created active, so the URL is what tells them apart.
-        if (!String(options.url ?? '').includes('onboarding')) log.tabIds.push(id)
-        tabUrls.set(id, String(options.url ?? ''))
+        if (!url.includes('onboarding')) log.tabIds.push(id)
+        tabUrls.set(id, url)
         tabStatus.set(id, opts.popupStartsLoading ? 'loading' : 'complete')
+        // A tab created with no URL is the hidden one the retailer is about to
+        // be loaded into; everything else is a popup or the onboarding page.
+        if (!url) log.captureTabId = id
         return Promise.resolve({ id })
       },
       update(tabId, options) {
         log.tabsUpdated.push({ tabId, opts: options })
-        if (opts.tabsUpdateFails) return Promise.reject(new Error('cannot navigate'))
         if (!opts.stallNavigation && typeof options.url === 'string') {
           tabUrls.set(tabId, options.url)
           // A navigation onto a registered origin is what actually runs the
@@ -281,6 +287,12 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
 
 const LOADING_PAGE = 'chrome-extension://dripd/loading.html'
 
+/** The `tabs.update` calls that actually sent a tab somewhere. The rest are the
+ *  swap making the retailer's tab the visible one. */
+function navigations(log: { tabsUpdated: { tabId: number; opts: Record<string, unknown> }[] }) {
+  return log.tabsUpdated.filter((u) => typeof u.opts.url === 'string')
+}
+
 /** Spin the microtask queue far enough for the router to have parked. */
 async function settleMicrotasks(): Promise<void> {
   for (let i = 0; i < 200; i++) await Promise.resolve()
@@ -369,10 +381,11 @@ describe('harvest', () => {
 
     expect(reply).toMatchObject({ ok: true })
     expect(log.windowsCreated).toHaveLength(1)
-    expect(log.tabsCreated).toEqual([])
     expect(log.windowsRemoved).toEqual([])
-    // And the tab it navigates is the one that window actually owns.
-    expect(log.tabsUpdated).toEqual([{ tabId: log.tabIds[0], opts: { url: PDP } }])
+    // The only tab created is the hidden one the retailer loads in, and it is
+    // opened in the window `tabs.query` reported — not in one of its own.
+    expect(log.tabsCreated).toEqual([{ windowId: 100, active: false }])
+    expect(navigations(log)).toEqual([{ tabId: log.captureTabId, opts: { url: PDP } }])
   })
 
   it('asks for focus again after creating the window', async () => {
@@ -446,7 +459,7 @@ describe('framing — the harvest waits for a human', () => {
 
     const inFlight = router.handle({ kind: 'harvest', url: PDP })
     await untilFraming(router)
-    closeTab(log.tabIds[0]!)
+    closeTab(log.captureTabId!)
 
     // Travels as itself, not wrapped in inject_failed: the studio has its own
     // copy for "you closed it", and that must not read like a crash.
@@ -543,7 +556,7 @@ describe('resolve — the window, not the session', () => {
 
     await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
 
-    expect(log.tabsRemoved).toHaveLength(1)
+    expect(log.tabsRemoved).toContain(log.captureTabId)
     expect(log.windowsRemoved).toEqual([])
   })
 })
@@ -680,14 +693,30 @@ describe('opening the popup', () => {
     expect(log.windowsCreated[0]!.url).toBe(LOADING_PAGE)
   })
 
-  it('sends the same tab on to the retailer once the window exists', async () => {
+  it('loads the retailer in its own hidden tab, never in the visible one', async () => {
+    // The visible tab is never navigated, which is the whole point: a
+    // navigation is the one moment nothing can be painted, and Firefox holds
+    // the previous pixels only for same-origin ones.
     const { router, log } = build()
     await startSession(router)
 
-    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+    expect(log.tabsCreated).toContainEqual({ windowId: 100, active: false })
+    expect(navigations(log)).toEqual([{ tabId: log.captureTabId, opts: { url: PDP } }])
+    expect(log.captureTabId).not.toBe(log.tabIds[0])
   })
 
-  it('waits for our page to be on screen before navigating off it', async () => {
+  it('shows the retailer tab and closes the loading one when the bundle reports in', async () => {
+    const { router, log } = build()
+    await startSession(router)
+
+    expect(log.tabsUpdated).toContainEqual({
+      tabId: log.captureTabId,
+      opts: { active: true },
+    })
+    expect(log.tabsRemoved).toContain(log.tabIds[0])
+  })
+
+  it('waits for our page to be on screen before starting the retailer', async () => {
     // The bug this exists to stop: `windows.create` resolves when the WINDOW
     // exists, not when its tab has loaded or painted. Navigating on the next
     // line hands the retailer a window the loading page never reached — so the
@@ -699,12 +728,12 @@ describe('opening the popup', () => {
     void router.handle({ kind: 'harvest', url: PDP })
     await settleMicrotasks()
 
-    expect(log.tabsUpdated).toEqual([])
+    expect(log.tabsCreated).toEqual([])
 
     updateTab(log.tabIds[0]!, 'complete')
     await settleMicrotasks()
 
-    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+    expect(navigations(log)).toEqual([{ tabId: log.captureTabId, opts: { url: PDP } }])
   })
 
   it('gives up waiting rather than stranding the capture on our own page', async () => {
@@ -714,12 +743,12 @@ describe('opening the popup', () => {
     const { router, log, timers } = build({ popupStartsLoading: true, loadingPageTimeoutMs: 5_000 })
     void router.handle({ kind: 'harvest', url: PDP })
     await settleMicrotasks()
-    expect(log.tabsUpdated).toEqual([])
+    expect(log.tabsCreated).toEqual([])
 
     timers.fireAll()
     await settleMicrotasks()
 
-    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+    expect(navigations(log)).toEqual([{ tabId: log.captureTabId, opts: { url: PDP } }])
   })
 
   it('opens the fallback tab on our own page too', async () => {
@@ -729,13 +758,13 @@ describe('opening the popup', () => {
     await startSession(router)
 
     expect(log.tabsCreated[0]!.url).toBe(LOADING_PAGE)
-    expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
+    expect(navigations(log)).toEqual([{ tabId: log.captureTabId, opts: { url: PDP } }])
   })
 
-  it('gives up the capture when the popup cannot be sent to the retailer', async () => {
+  it('gives up the capture when the retailer has nowhere to load', async () => {
     // A popup stuck on our loading page has nothing to harvest. Failing here is
     // what stops it being discovered as an empty harvest of our own spinner.
-    const { router, log } = build({ tabsUpdateFails: true })
+    const { router, log } = build({ captureTabFails: true })
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
     expect(reply.ok).toBe(false)
@@ -782,7 +811,7 @@ describe('the document_start registration', () => {
     await startSession(router)
 
     expect(log.registered).toHaveLength(1)
-    expect(log.tabsUpdated).toHaveLength(1)
+    expect(navigations(log)).toHaveLength(1)
   })
 
   it('answers the bundle with the session that owns its tab', async () => {
@@ -828,7 +857,7 @@ describe('the document_start registration', () => {
   })
 
   it('unregisters when a capture fails', async () => {
-    const { router, log } = build({ tabsUpdateFails: true })
+    const { router, log } = build({ captureTabFails: true })
     await router.handle({ kind: 'harvest', url: PDP })
 
     expect(log.unregistered).toHaveLength(1)
@@ -841,6 +870,6 @@ describe('the document_start registration', () => {
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
     expect(reply.ok).toBe(false)
-    expect(log.tabsUpdated).toEqual([])
+    expect(log.tabsCreated).toEqual([])
   })
 })

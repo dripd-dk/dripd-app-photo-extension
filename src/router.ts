@@ -163,7 +163,20 @@ interface Session {
    *  window closes. */
   scriptId: string
   windowId: number | null
+  /** The tab the retailer loads in — the one the viewfinder ends up on. */
   tabId: number | null
+  /**
+   * The tab showing `loading.html`, until the retailer's tab takes over.
+   *
+   * Two tabs rather than one navigation, because a navigation is the one moment
+   * nothing can be painted. Firefox holds the previous page's pixels only for
+   * same-origin navigations, and `moz-extension:` to `https:` is neither
+   * same-origin nor same-process — so for the length of the retailer's
+   * time-to-first-byte the window showed the browser's own background, and no
+   * content script can cover a document that does not exist yet. Loading it in a
+   * second tab means the visible tab is never navigated at all.
+   */
+  loadingTabId: number | null
   timer: unknown
 }
 
@@ -304,10 +317,11 @@ export function createRouter(deps: RouterDeps): Router {
   }
 
   async function closeWindow(session: Session): Promise<void> {
-    const { windowId, tabId, scriptId } = session
+    const { windowId, tabId, loadingTabId, scriptId } = session
     // Cleared first: a failed remove must not leave us retrying it forever.
     session.windowId = null
     session.tabId = null
+    session.loadingTabId = null
 
     // The registration is undone here rather than when `harvest` returns,
     // because the window outliving the harvest is the point: on an empty
@@ -322,7 +336,13 @@ export function createRouter(deps: RouterDeps): Router {
     }
     try {
       if (windowId != null) await api.windows.remove(windowId)
-      else if (tabId != null) await api.tabs.remove(tabId)
+      // The fallback path has no window of its own, so both tabs are ours to
+      // close — including the spinner, if the swap never happened.
+      else {
+        for (const id of [tabId, loadingTabId]) {
+          if (id != null) await api.tabs.remove(id)
+        }
+      }
     } catch {
       /* already gone — the user may have closed it */
     }
@@ -521,7 +541,10 @@ export function createRouter(deps: RouterDeps): Router {
       id: sessionId,
       scriptId: `dripd-capture-${sessionId}`,
       windowId: opened.windowId,
-      tabId: opened.tabId,
+      // Filled in once the retailer's tab exists; until then the popup is
+      // showing our loading page and there is nothing to capture in.
+      tabId: null,
+      loadingTabId: opened.tabId,
       timer: null,
     }
 
@@ -581,22 +604,37 @@ export function createRouter(deps: RouterDeps): Router {
         },
       ])
 
+      // The retailer loads in its own tab, behind the one showing the spinner.
+      // `active: false` is the whole trick: a tab nobody is looking at can take
+      // as long as it likes to answer, and the window keeps painting the page it
+      // already has.
+      //
+      // Created empty and navigated afterwards, rather than created on the URL,
+      // so that `session.tabId` is known before anything can load in it. `ready`
+      // is answered by matching that id, and a bundle asking before we know it
+      // would be told to stand down and would never arm. The navigation costs
+      // nothing here — this tab has never been visible.
+      const captureTab = await api.tabs.create(
+        opened.windowId != null
+          ? { windowId: opened.windowId, active: false }
+          : { active: false },
+      )
+      if (captureTab?.id == null) throw new Error(ERR.openFailed)
+      session.tabId = captureTab.id
+
       // Registered before the navigation, not after. The bundle arms itself at
-      // `document_start`, so the user can press the button as soon as the page
-      // is up, and a message arriving before anything waits for it would be
-      // dropped as a stray.
-      const framed = awaitFrame(session.id, opened.tabId)
-      // Marks the rejection handled without consuming it: if the navigation
-      // throws below we never reach `await framed`, and an unhandled rejection
-      // in a service worker is a console error in the user's face for a case we
+      // `document_start`, so a harvest can come back the instant the page is up,
+      // and a message arriving before anything waits for it is dropped as a
+      // stray — leaving the capture hanging until the frame timeout.
+      const framed = awaitFrame(session.id, captureTab.id)
+      // Marks the rejection handled without consuming it: if anything below
+      // throws we never reach `await framed`, and an unhandled rejection in a
+      // service worker is a console error in the user's face for a case we
       // handle here.
       void framed.catch(() => {})
-
-      // Only now does the retailer start loading — behind a page that is already
-      // on screen, and in front of a bundle that is already registered to cover
-      // whatever it becomes.
-      await api.tabs.update(opened.tabId, { url: target.href })
       log('framing', session.id, target.href)
+
+      await api.tabs.update(captureTab.id, { url: target.href })
 
       const result = await framed
 
@@ -723,9 +761,35 @@ export function createRouter(deps: RouterDeps): Router {
     const tabId = sender?.tab?.id
     if (tabId == null) return { ok: false, error: ERR.noSession }
     for (const session of sessions.values()) {
-      if (session.tabId === tabId) return { ok: true, sessionId: session.id }
+      if (session.tabId === tabId) {
+        // The bundle installs its cover before it asks this, so by the time we
+        // answer, that tab's document already carries the same spinner the
+        // visible tab is showing. Swapping now is the handover, and it is
+        // invisible precisely because both sides are drawn the same.
+        void revealCaptureTab(session)
+        return { ok: true, sessionId: session.id }
+      }
     }
     return { ok: false, error: ERR.noSession }
+  }
+
+  /** Show the retailer's tab and drop the loading one. Once per session. */
+  async function revealCaptureTab(session: Session): Promise<void> {
+    const loadingTabId = session.loadingTabId
+    if (loadingTabId == null || session.tabId == null) return
+    // Cleared first: a failed swap must not leave us retrying it on every
+    // document the retailer's origin loads.
+    session.loadingTabId = null
+    try {
+      await api.tabs.update(session.tabId, { active: true })
+    } catch (e) {
+      log('could not show the capture tab', e)
+    }
+    try {
+      await api.tabs.remove(loadingTabId)
+    } catch (e) {
+      log('could not close the loading tab', e)
+    }
   }
 
   async function handle(msg: unknown, sender?: MessageSender): Promise<Reply> {

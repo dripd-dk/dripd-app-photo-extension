@@ -94,9 +94,29 @@ did nothing.
 **The popup opens on `loading.html`, not on the retailer**, and *then something
 waits for it*. `windows.create` resolves when the window exists, not when its tab
 has loaded, so the first version of this navigated on within milliseconds and
-reproduced the original bug exactly. The navigation is gated on our own page
-being on screen, with a short budget, matched by URL prefix — an extension URL's
-origin is the string `"null"`, so an origin comparison there decides nothing.
+reproduced the original bug exactly. That wait is matched by URL prefix — an
+extension URL's origin is the string `"null"`, so an origin comparison there
+decides nothing.
+
+**The visible tab is then never navigated at all.** The retailer loads in a
+second, hidden tab of the same window, and the swap happens when its bundle
+reports in. A navigation is the one moment nothing can be painted: Firefox holds
+the previous page's pixels only for **same-origin** navigations, and
+`moz-extension:` to `https:` is neither same-origin nor same-process, so for the
+length of the retailer's time-to-first-byte the window showed the browser's own
+background — the user's theme colour, flashing between two spinners. No content
+script can cover a document that does not exist yet, so the answer is not to have
+a gap rather than to fill one.
+
+The swap is triggered by `ready`, which the bundle sends *after* installing its
+cover. By the time we answer it, the hidden tab's document already carries the
+same spinner the visible one is showing, so the handover is invisible precisely
+because both sides are drawn the same.
+
+That tab is created **empty** and navigated afterwards, rather than created on
+the URL, so `session.tabId` is known before anything can load in it. `ready` is
+answered by matching that id, and a bundle asking before we knew it would be told
+to stand down and would never arm.
 
 **The bundle is registered, not injected.** `scripting.registerContentScripts`,
 `run_at: document_start`, the retailer's origin, one registration per capture.
@@ -208,7 +228,7 @@ is worthless after a restart.
 
 ## Tests
 
-107 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+108 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `key` / `frame` — pure functions over a happy-dom DOM. The
