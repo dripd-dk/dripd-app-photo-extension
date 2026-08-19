@@ -55,14 +55,13 @@ import {
   type ResolveAction,
 } from './protocol'
 
+/** A session with no fetch activity is dead weight; the popup it owns is worse.
+ *  Extended by every `fetchBytes`, so an active capture never trips it. */
 const DEFAULT_TTL_MS = 60_000
-const DEFAULT_LOAD_TIMEOUT_MS = 20_000
 /** How long the viewfinder waits for a human. Generous on purpose — finding the
  *  right photo on a slow retailer page is a minutes-long job, and the honest
  *  end of a session the user walked away from is the closed tab, not this. */
 const DEFAULT_FRAME_TIMEOUT_MS = 5 * 60_000
-/** After `load` fires there is still layout and lazy-loading to come. */
-const DEFAULT_SETTLE_MS = 800
 const POPUP_WIDTH = 1280
 const POPUP_HEIGHT = 960
 /** Matches the cap on `POST /api/studio/cutout`: bigger cannot be used anyway,
@@ -135,6 +134,9 @@ export interface BrowserLike {
   }
   scripting: {
     executeScript(opts: Record<string, unknown>): Promise<{ result?: unknown }[]>
+    /** One per capture, at `document_start`, for the retailer's origin. */
+    registerContentScripts(scripts: Record<string, unknown>[]): Promise<void>
+    unregisterContentScripts(filter: { ids: string[] }): Promise<void>
   }
 }
 
@@ -143,9 +145,7 @@ export interface RouterDeps {
   fetchImpl?: typeof fetch
   version?: string
   ttlMs?: number
-  loadTimeoutMs?: number
   loadingPageTimeoutMs?: number
-  settleMs?: number
   frameTimeoutMs?: number
   now?: () => number
   newId?: () => string
@@ -159,9 +159,17 @@ export interface RouterDeps {
 
 interface Session {
   id: string
+  /** The `document_start` registration made for this capture, undone when the
+   *  window closes. */
+  scriptId: string
   windowId: number | null
   tabId: number | null
   timer: unknown
+}
+
+/** Who sent a message. Only `ready` cares, and only about the tab. */
+export interface MessageSender {
+  tab?: { id?: number }
 }
 
 /** A `harvest` parked on a human. */
@@ -173,89 +181,12 @@ interface PendingFrame {
 }
 
 export interface Router {
-  handle(msg: unknown): Promise<Reply>
+  handle(msg: unknown, sender?: MessageSender): Promise<Reply>
   /** Test seams. Not used by `sw.ts`. */
   sessionCount(): number
   sessionWindow(sessionId: string): number | null | undefined
   /** Harvests currently parked on a human. Must return to 0 on every exit path. */
   pendingCount(): number
-}
-
-/**
- * Injected into the retailer page to arm the already-injected bundle.
- *
- * Serialized by the browser, so it must reference nothing outside itself — that
- * constraint is the entire reason `injected.js` is a separate bundle rather than
- * one enormous function. The session id travels through `args` so the overlay's
- * eventual message can name its own session instead of us having to infer it from
- * the sender's tab.
- *
- * `executeScript` awaits the returned promise, which here settles as soon as the
- * viewfinder is on screen — the *user's* part is awaited over the message channel,
- * not through this call.
- */
-function armInjectedFrame(sessionId: string): unknown {
-  return (
-    globalThis as unknown as { __dripdHarvest: { arm(id: string): unknown } }
-  ).__dripdHarvest.arm(sessionId)
-}
-
-/**
- * Cover the popup until the viewfinder is over the page.
- *
- * Opening a window onto a shop page and doing nothing to it for a second or two
- * reads as a window that opened and broke. The gap is real and unavoidable: the
- * page has to load, a consent wall has to be dismissed, and only then can the
- * overlay mount. So nothing of the retailer's page is shown until there is a
- * viewfinder on it — `mountFrameOverlay` removes this, in the same document, the
- * moment it has one.
- *
- * Self-contained because it is serialised into the page: the id is a literal
- * here and `LOADING_HOST_ID` in `frame.ts`, and the router tests match the two.
- *
- * Shadow DOM with an `all: initial` reset for the same reason the viewfinder
- * uses one — a retailer stylesheet must not be able to blank the cover.
- */
-function showLoadingScrim(): void {
-  var ID = '__dripd_loading'
-  if (document.getElementById(ID)) return
-  var host = document.createElement('div')
-  host.id = ID
-  host.setAttribute(
-    'style',
-    'all:initial;position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483646;',
-  )
-  var root = host.attachShadow({ mode: 'open' })
-  var style = document.createElement('style')
-  style.textContent =
-    ':host{all:initial}' +
-    '.wrap{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;' +
-    'flex-direction:column;align-items:center;justify-content:center;gap:16px;' +
-    'background:#faf8f5;font:600 14px/1.45 -apple-system,BlinkMacSystemFont,' +
-    '"Segoe UI",system-ui,sans-serif;color:#5c574e;}' +
-    '.ring{width:32px;height:32px;border-radius:50%;border:3px solid #eae6df;' +
-    'border-top-color:#059669;animation:dripd-spin .8s linear infinite;}' +
-    '@keyframes dripd-spin{to{transform:rotate(360deg)}}' +
-    '@media (prefers-reduced-motion:reduce){.ring{animation-duration:2.4s}}'
-  var wrap = document.createElement('div')
-  wrap.className = 'wrap'
-  var ring = document.createElement('div')
-  ring.className = 'ring'
-  var text = document.createElement('div')
-  text.textContent = 'Gør rammen klar…'
-  wrap.appendChild(ring)
-  wrap.appendChild(text)
-  root.appendChild(style)
-  root.appendChild(wrap)
-  document.documentElement.appendChild(host)
-
-  // Nothing should ever leave an opaque panel over a page the user can still
-  // click. Every path that ends a capture closes the window, so this only fires
-  // if one of them did not — in which case showing the page beats trapping it.
-  setTimeout(function () {
-    var stale = document.getElementById(ID)
-    if (stale) stale.remove()
-  }, 20000)
 }
 
 /** Injected on `surface`, so the user looking at the retailer page knows why. */
@@ -322,9 +253,7 @@ export function createRouter(deps: RouterDeps): Router {
   const doFetch = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   const version = deps.version ?? '0.0.0'
   const ttlMs = deps.ttlMs ?? DEFAULT_TTL_MS
-  const loadTimeoutMs = deps.loadTimeoutMs ?? DEFAULT_LOAD_TIMEOUT_MS
   const loadingPageTimeoutMs = deps.loadingPageTimeoutMs ?? DEFAULT_LOADING_PAGE_TIMEOUT_MS
-  const settleMs = deps.settleMs ?? DEFAULT_SETTLE_MS
   const frameTimeoutMs = deps.frameTimeoutMs ?? DEFAULT_FRAME_TIMEOUT_MS
   const newId = deps.newId ?? (() => crypto.randomUUID())
   const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms))
@@ -374,16 +303,23 @@ export function createRouter(deps: RouterDeps): Router {
     })
   }
 
-  const wait = (ms: number) =>
-    new Promise<void>((resolve) => {
-      schedule(resolve, ms)
-    })
-
   async function closeWindow(session: Session): Promise<void> {
-    const { windowId, tabId } = session
+    const { windowId, tabId, scriptId } = session
     // Cleared first: a failed remove must not leave us retrying it forever.
     session.windowId = null
     session.tabId = null
+
+    // The registration is undone here rather than when `harvest` returns,
+    // because the window outliving the harvest is the point: on an empty
+    // ranking the studio surfaces it again and the user re-frames, and until
+    // the window is gone a navigation still needs to re-arm the viewfinder.
+    // Unconditional and swallowed — an id that was never registered is exactly
+    // as fine as one that was.
+    try {
+      await api.scripting.unregisterContentScripts({ ids: [scriptId] })
+    } catch (e) {
+      log('could not unregister', scriptId, e)
+    }
     try {
       if (windowId != null) await api.windows.remove(windowId)
       else if (tabId != null) await api.tabs.remove(tabId)
@@ -496,18 +432,6 @@ export function createRouter(deps: RouterDeps): Router {
     return null
   }
 
-  /** Is the tab showing a page on this origin? Only meaningful for http(s):
-   *  an extension URL's origin is the string "null", which would be true of
-   *  every other non-special scheme too. */
-  function isOnOrigin(url: string | undefined, origin: string): boolean {
-    if (!url) return false
-    try {
-      return new URL(url).origin === origin
-    } catch {
-      return false
-    }
-  }
-
   /**
    * Resolve when the tab reports `complete` **on the page we are waiting for**,
    * or when the budget runs out — a slow page still gets harvested, it just gets
@@ -592,8 +516,10 @@ export function createRouter(deps: RouterDeps): Router {
     const opened = await openPopup(loadingUrl)
     if (!opened) return { ok: false, error: ERR.openFailed }
 
+    const sessionId = newId()
     const session: Session = {
-      id: newId(),
+      id: sessionId,
+      scriptId: `dripd-capture-${sessionId}`,
       windowId: opened.windowId,
       tabId: opened.tabId,
       timer: null,
@@ -607,37 +533,12 @@ export function createRouter(deps: RouterDeps): Router {
     sessions.set(session.id, session)
     syncKeepAlive()
 
-    /**
-     * The loading page covers the popup until the retailer's document replaces
-     * it; from there this covers the retailer's own document. A page that
-     * renders progressively is visible long before it reports `complete`, so
-     * every progress report is another chance to cover it.
-     */
-    const cover = () => {
-      void api.scripting
-        .executeScript({ target: { tabId: opened.tabId }, func: showLoadingScrim })
-        // No document to inject into yet. Cosmetic, and the next report retries.
-        .catch((e) => log('cover failed', e))
-    }
-    const onProgress = (id: number) => {
-      if (id === opened.tabId) cover()
-    }
-    let covering = true
-    const stopCovering = () => {
-      if (!covering) return
-      covering = false
-      try {
-        api.tabs.onUpdated.removeListener(onProgress)
-      } catch (e) {
-        log('could not stop covering', e)
-      }
-    }
     try {
       // Wait for our own page to actually BE on screen.
       //
       // `windows.create` resolves when the window exists, not when its tab has
       // loaded, and everything between here and the navigation is synchronous.
-      // Without this the retailer is navigated to within milliseconds — the
+      // Without this the retailer is navigated to within milliseconds, the
       // loading page is left before it ever paints, and the user watches the
       // shop load exactly as they did before this page existed. Opening on our
       // own page buys nothing unless something waits for it.
@@ -650,51 +551,51 @@ export function createRouter(deps: RouterDeps): Router {
         loadingPageTimeoutMs,
       )
 
-      // Armed only now. Before this point the tab is showing our own page, and
-      // covering a spinner with a spinner is the one thing the cover must not
-      // do.
-      api.tabs.onUpdated.addListener(onProgress)
+      /**
+       * One registration, for this capture, at `document_start`.
+       *
+       * This is what replaced the injection race. The bundle used to be pushed
+       * in with `executeScript` after the load wait and the settle — by which
+       * point the shop had been fully visible for the better part of a second —
+       * and armed with a second call. Firefox blocks injection into our own
+       * extension page, `tabs.update` does not change a tab's URL synchronously,
+       * and neither fact can be worked around by moving a listener; that was
+       * tried three times.
+       *
+       * The browser now runs the bundle before each document paints: the first
+       * one, and every one a redirect or a reload produces. A navigation stops
+       * losing the viewfinder and starts re-arming it.
+       *
+       * `persistAcrossSessions: false` because the default is **true**. A
+       * registration left behind would keep running on that shop, in every tab
+       * and every window, until the browser restarts.
+       */
+      await api.scripting.registerContentScripts([
+        {
+          id: session.scriptId,
+          js: ['injected.js'],
+          matches: [`${target.origin}/*`],
+          runAt: 'document_start',
+          allFrames: false,
+          persistAcrossSessions: false,
+        },
+      ])
 
-      // Only now does the retailer start loading, behind a page that is already
-      // on screen rather than in front of nothing. A tab we cannot navigate is
-      // a popup stuck on our spinner with nothing to harvest, so a failure here
-      // ends the capture instead of being discovered later as an empty one.
-      await api.tabs.update(opened.tabId, { url: target.href })
-      await waitForLoad(opened.tabId, (u) => isOnOrigin(u, target.origin), loadTimeoutMs)
-      await wait(settleMs)
-      // What that tab is ACTUALLY showing before we inject into it. If this is
-      // not the retailer, everything downstream is aimed at the wrong page and
-      // the viewfinder lands somewhere nobody wanted it.
-      try {
-        const tab = await api.tabs.get(opened.tabId)
-        log('tab before inject', { tabId: opened.tabId, url: tab?.url, status: tab?.status })
-      } catch (e) {
-        log('could not read tab before inject', e)
-      }
-      // The last cover before the viewfinder, and the only one guaranteed to be
-      // on the document it will mount into. Listening stops first, so nothing
-      // can put a cover back over the viewfinder once it is up.
-      stopCovering()
-      cover()
-
-      await api.scripting.executeScript({
-        target: { tabId: opened.tabId },
-        files: ['injected.js'],
-      })
-
-      // Registered before arming, not after: the user can press the button the
-      // instant the viewfinder appears, and a message arriving before there is
-      // anything waiting for it would be dropped as a stray.
+      // Registered before the navigation, not after. The bundle arms itself at
+      // `document_start`, so the user can press the button as soon as the page
+      // is up, and a message arriving before anything waits for it would be
+      // dropped as a stray.
       const framed = awaitFrame(session.id, opened.tabId)
-      // Marks the rejection handled without consuming it: if arming throws below,
-      // we never reach `await framed`, and an unhandled rejection in a service
-      // worker is a console error in the user's face for a case we handle here.
+      // Marks the rejection handled without consuming it: if the navigation
+      // throws below we never reach `await framed`, and an unhandled rejection
+      // in a service worker is a console error in the user's face for a case we
+      // handle here.
       void framed.catch(() => {})
-      await api.scripting.executeScript({
-        target: { tabId: opened.tabId },
-        func: armInjectedFrame,
-        args: [session.id],
-      })
+
+      // Only now does the retailer start loading — behind a page that is already
+      // on screen, and in front of a bundle that is already registered to cover
+      // whatever it becomes.
+      await api.tabs.update(opened.tabId, { url: target.href })
       log('framing', session.id, target.href)
 
       const result = await framed
@@ -707,7 +608,6 @@ export function createRouter(deps: RouterDeps): Router {
       // ranking finds nothing usable the user needs it surfaced, not gone.
       return { ok: true, sessionId: session.id, harvest: result }
     } catch (e) {
-      stopCovering()
       const message = (e as Error).message ?? String(e)
       log('harvest failed', message)
       settleFrame(session.id, new Error(message))
@@ -810,9 +710,29 @@ export function createRouter(deps: RouterDeps): Router {
     return { ok: true }
   }
 
-  async function handle(msg: unknown): Promise<Reply> {
+  /**
+   * Which capture, if any, owns the tab this message came from.
+   *
+   * The one question in this protocol that the sender cannot answer itself. The
+   * bundle is registered for the retailer's ORIGIN, so it also runs in whatever
+   * other tabs the user has open on that shop — from the page there is nothing
+   * to tell them apart. A tab with no session gets told so and stands down,
+   * taking its own cover back off.
+   */
+  function readyFor(sender: MessageSender | undefined): Reply {
+    const tabId = sender?.tab?.id
+    if (tabId == null) return { ok: false, error: ERR.noSession }
+    for (const session of sessions.values()) {
+      if (session.tabId === tabId) return { ok: true, sessionId: session.id }
+    }
+    return { ok: false, error: ERR.noSession }
+  }
+
+  async function handle(msg: unknown, sender?: MessageSender): Promise<Reply> {
     const req = msg as Partial<Req> | null
     switch (req?.kind) {
+      case 'ready':
+        return readyFor(sender)
       case 'ping':
         return { ok: true, version }
       case 'harvest':

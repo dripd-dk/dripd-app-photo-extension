@@ -19,7 +19,7 @@
 
 export const MARKER = '__dripd' as const
 
-export type Kind = 'ping' | 'harvest' | 'fetchBytes' | 'resolve' | 'framed'
+export type Kind = 'ping' | 'harvest' | 'fetchBytes' | 'resolve' | 'framed' | 'ready'
 export type ResolveAction = 'dismiss' | 'surface'
 
 export interface RawImage {
@@ -73,7 +73,24 @@ export interface FramedReq {
   cancelled?: boolean
 }
 
-export type Req = PingReq | HarvestReq | FetchBytesReq | ResolveReq | FramedReq
+/**
+ * Sent by the injected bundle the moment it loads, before it does anything.
+ *
+ * The bundle is registered for the retailer's ORIGIN, so it also runs in any
+ * other tab the user has open on that shop — it cannot know from the page alone
+ * whether it is the capture. It asks, and the background answers from the tab
+ * the message came in on. A tab that is not a capture takes its cover down and
+ * does nothing else.
+ *
+ * This is the one message whose meaning depends on its sender's tab rather than
+ * on its contents, for the simple reason that its whole question is "which tab
+ * am I".
+ */
+export interface ReadyReq {
+  kind: 'ready'
+}
+
+export type Req = PingReq | HarvestReq | FetchBytesReq | ResolveReq | FramedReq | ReadyReq
 
 export type Reply =
   | { ok: true; [k: string]: unknown }

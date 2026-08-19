@@ -16,8 +16,8 @@ import {
   markFramed,
   mountFrameOverlay,
   HOST_ID,
-  LOADING_HOST_ID,
 } from '../src/injected/frame'
+import { LOADING_HOST_ID } from '../src/injected/cover'
 import type { RawHarvest } from '../src/protocol'
 
 const realRect = Element.prototype.getBoundingClientRect

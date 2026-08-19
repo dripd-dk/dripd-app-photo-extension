@@ -17,13 +17,16 @@ const router = createRouter({
   log: (...args) => console.log('[dripd]', ...args),
 })
 
-api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Anything not ours belongs to someone else — say nothing and let another
   // listener answer.
   if (!msg || (msg as Record<string, unknown>)[MARKER] !== true) return undefined
 
+  // `sender` matters for exactly one message: the bundle asking whether its tab
+  // is a capture. It runs on every tab of the retailer's origin and cannot tell
+  // from the page which one it is in.
   router
-    .handle(msg)
+    .handle(msg, sender)
     .then(sendResponse)
     .catch((e: unknown) => sendResponse({ ok: false, error: String(e) }))
 

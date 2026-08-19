@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRouter, type BrowserLike, type Router } from '../src/router'
-import { LOADING_HOST_ID } from '../src/injected/frame'
 import type { RawHarvest } from '../src/protocol'
 
 const PDP = 'https://www2.hm.com/da_dk/productpage.1358428002.html'
@@ -47,7 +46,6 @@ interface FakeOptions {
   granted?: boolean
   harvestResult?: unknown
   windowCreateFailures?: number
-  executeScriptError?: string
   /** Leave the viewfinder up instead of pressing the button, so a test can drive
    *  the ways a framing session ends without one. */
   autoFrame?: boolean
@@ -62,14 +60,12 @@ interface FakeOptions {
    * window in which the page is visible and the viewfinder is not.
    */
   tabNeverComplete?: boolean
-  /** Reject only the cover injection, leaving the rest of the capture working. */
-  coverInjectFails?: boolean
   /** Ignore `tabs.update`, so a test can drive the retailer navigation itself. */
   stallNavigation?: boolean
-  /** Long enough that the load timeout stays parked instead of firing. */
-  loadTimeoutMs?: number
   /** Reject the navigation off our loading page. */
   tabsUpdateFails?: boolean
+  /** Reject the `document_start` registration. */
+  registerFails?: boolean
   /**
    * The popup's tab starts in `loading`, as a real one does.
    *
@@ -96,7 +92,7 @@ function fakeApi(opts: FakeOptions = {}) {
   const tabUrls = new Map<number, string>()
   /** Per-tab load state, so a test can hold a tab mid-load and release it. */
   const tabStatus = new Map<number, string>()
-  let onArm: ((sessionId: string) => void) | null = null
+  let onNavigated: ((tabId: number, url: string) => void) | null = null
 
   const log = {
     windowsCreated: [] as Record<string, unknown>[],
@@ -106,6 +102,8 @@ function fakeApi(opts: FakeOptions = {}) {
     tabsUpdated: [] as { tabId: number; opts: Record<string, unknown> }[],
     tabsRemoved: [] as number[],
     scripts: [] as Record<string, unknown>[],
+    registered: [] as Record<string, unknown>[],
+    unregistered: [] as string[],
     /** Whatever the popup ended up being, window or fallback tab. */
     tabIds: [] as number[],
   }
@@ -155,6 +153,10 @@ function fakeApi(opts: FakeOptions = {}) {
         if (opts.tabsUpdateFails) return Promise.reject(new Error('cannot navigate'))
         if (!opts.stallNavigation && typeof options.url === 'string') {
           tabUrls.set(tabId, options.url)
+          // A navigation onto a registered origin is what actually runs the
+          // bundle. Nothing else in this fake pretends to be the page.
+          const url = options.url
+          queueMicrotask(() => onNavigated?.(tabId, url))
         }
         return Promise.resolve({ id: tabId, url: tabUrls.get(tabId) })
       },
@@ -184,16 +186,16 @@ function fakeApi(opts: FakeOptions = {}) {
     scripting: {
       executeScript(options) {
         log.scripts.push(options)
-        if (opts.executeScriptError) return Promise.reject(new Error(opts.executeScriptError))
-        if (opts.coverInjectFails && String(options.func ?? '').includes(LOADING_HOST_ID)) {
-          return Promise.reject(new Error('no tab with id'))
-        }
-        // Arming carries the session id in `args`; that is the call a real user
-        // would answer by pressing the button, so it is where the fake presses it.
-        const args = options.args as unknown[] | undefined
-        const sessionId = typeof args?.[0] === 'string' ? args[0] : null
-        if (sessionId) queueMicrotask(() => onArm?.(sessionId))
         return Promise.resolve([{}])
+      },
+      registerContentScripts(scripts) {
+        if (opts.registerFails) return Promise.reject(new Error('cannot register'))
+        log.registered.push(...scripts)
+        return Promise.resolve()
+      },
+      unregisterContentScripts(filter) {
+        log.unregistered.push(...filter.ids)
+        return Promise.resolve()
       },
     },
   }
@@ -210,8 +212,8 @@ function fakeApi(opts: FakeOptions = {}) {
       tabStatus.set(tabId, status)
       ;[...updateListeners].forEach((fn) => fn(tabId, { status }))
     },
-    setOnArm: (fn: (sessionId: string) => void) => {
-      onArm = fn
+    setOnNavigated: (fn: (tabId: number, url: string) => void) => {
+      onNavigated = fn
     },
   }
 }
@@ -229,7 +231,7 @@ function fakeFetch(body: Uint8Array, init: { ok?: boolean; status?: number; type
 
 function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
   const timers = fakeTimers()
-  const { api, log, closeTab, updateTab, navigateTab, setOnArm } = fakeApi(opts)
+  const { api, log, closeTab, updateTab, navigateTab, setOnNavigated } = fakeApi(opts)
   // Kept off the timer seam on purpose: a 20 s heartbeat sharing `schedule` would
   // show up in every TTL assertion in this file.
   const keepAlive: boolean[] = []
@@ -239,26 +241,42 @@ function build(opts: FakeOptions = {}, fetchImpl?: typeof fetch) {
     fetchImpl: fetchImpl ?? (fakeFetch(new Uint8Array([1, 2, 3])) as unknown as typeof fetch),
     version: '0.1.0',
     ttlMs: 60_000,
-    loadTimeoutMs: opts.loadTimeoutMs ?? 10,
     loadingPageTimeoutMs: opts.loadingPageTimeoutMs ?? 10,
-    settleMs: 10,
     newId: () => `s${++n}`,
     schedule: timers.schedule,
     cancel: timers.cancel,
     keepAlive: (active) => keepAlive.push(active),
   })
-  // Most tests care about what happens once a photo has been framed, so the
-  // default fake presses the button the moment the viewfinder is armed.
-  if (opts.autoFrame !== false) {
-    setOnArm((sessionId) => {
+  /**
+   * The bundle the registration causes, played straight.
+   *
+   * It runs on a navigation onto a registered origin, asks the router whose tab
+   * it is over the real `ready` path, and stands down if the answer is nobody.
+   * That handshake is the whole reason a content script registered for an
+   * ORIGIN is safe to use for one tab, so the fake exercises it rather than
+   * shortcutting it.
+   */
+  const armed: string[] = []
+  setOnNavigated(async (tabId, url) => {
+    const matched = log.registered.some((r) =>
+      (r.matches as string[]).some((m) => url.startsWith(m.replace(/\*$/, ''))),
+    )
+    if (!matched) return
+    const reply = await router.handle({ kind: 'ready' }, { tab: { id: tabId } })
+    if (!reply.ok) return
+    const sessionId = String((reply as { sessionId?: unknown }).sessionId)
+    armed.push(sessionId)
+    // Most tests care about what happens once a photo has been framed, so the
+    // default fake presses the button as soon as the viewfinder is up.
+    if (opts.autoFrame !== false) {
       void router.handle({
         kind: 'framed',
         sessionId,
         harvest: opts.harvestResult ?? HARVEST,
       })
-    })
-  }
-  return { router, log, timers, keepAlive, closeTab, updateTab, navigateTab }
+    }
+  })
+  return { router, log, timers, keepAlive, closeTab, updateTab, navigateTab, armed }
 }
 
 const LOADING_PAGE = 'chrome-extension://dripd/loading.html'
@@ -266,19 +284,6 @@ const LOADING_PAGE = 'chrome-extension://dripd/loading.html'
 /** Spin the microtask queue far enough for the router to have parked. */
 async function settleMicrotasks(): Promise<void> {
   for (let i = 0; i < 200; i++) await Promise.resolve()
-}
-
-/** Every `executeScript` that put the loading scrim up. */
-function scrimInjections(scripts: Record<string, unknown>[]): number {
-  return scripts.filter((s) => String(s.func ?? '').includes(LOADING_HOST_ID)).length
-}
-
-/** Index of the call that injected the viewfinder bundle. */
-function injectedBundleAt(scripts: Record<string, unknown>[]): number {
-  return scripts.findIndex((s) => {
-    const files = s.files as string[] | undefined
-    return Array.isArray(files) && files.includes('injected.js')
-  })
 }
 
 /**
@@ -330,35 +335,6 @@ describe('harvest', () => {
     expect(router.sessionCount()).toBe(1)
   })
 
-  it('injects the bundle first, then arms it with the session id', async () => {
-    const { router, log } = build()
-    await router.handle({ kind: 'harvest', url: PDP })
-
-    // Found rather than indexed: the loading scrim is injected before either of
-    // these, so a fixed position only records how many covers happen to run.
-    const bundleAt = injectedBundleAt(log.scripts)
-    expect(bundleAt).toBeGreaterThanOrEqual(0)
-    expect(typeof log.scripts[bundleAt + 1]!.func).toBe('function')
-    // The overlay names its own session when it reports back, rather than the
-    // background inferring one from the sender's tab.
-    expect(log.scripts[bundleAt + 1]!.args).toEqual(['s1'])
-  })
-
-  it('injects an arm call that survives serialization', () => {
-    // The browser serializes `func` with toString(), so a reference to anything
-    // outside the function body would arrive undefined. Re-evaluating the source
-    // in a fresh scope is the same trip, and proves it.
-    const { router, log } = build()
-    return router.handle({ kind: 'harvest', url: PDP }).then(() => {
-      const source = String(log.scripts[injectedBundleAt(log.scripts) + 1]!.func)
-      const revived = new Function(`return (${source})`)() as (id: string) => unknown
-      ;(globalThis as unknown as { __dripdHarvest: unknown }).__dripdHarvest = {
-        arm: (id: string) => `armed:${id}`,
-      }
-      expect(revived('s1')).toBe('armed:s1')
-    })
-  })
-
   it('refuses anything that is not an https URL', async () => {
     const { router, log } = build()
 
@@ -385,7 +361,7 @@ describe('harvest', () => {
   it('opens ONE window when create answers without a tabs array', async () => {
     // Safari. `windows.create` resolves with the window and no `tabs`, and
     // treating that as failure opened a second popup beside the first — then a
-    // third fallback tab, which is where the injection went, which is why no
+    // third fallback tab, which is where the capture went, which is why no
     // viewfinder ever appeared on the retailer's page.
     const { router, log } = build({ omitCreatedTabs: true })
 
@@ -395,8 +371,8 @@ describe('harvest', () => {
     expect(log.windowsCreated).toHaveLength(1)
     expect(log.tabsCreated).toEqual([])
     expect(log.windowsRemoved).toEqual([])
-    // And the tab it injects into is the one that window actually owns.
-    expect(log.scripts[0]).toMatchObject({ target: { tabId: log.tabIds[0] } })
+    // And the tab it navigates is the one that window actually owns.
+    expect(log.tabsUpdated).toEqual([{ tabId: log.tabIds[0], opts: { url: PDP } }])
   })
 
   it('asks for focus again after creating the window', async () => {
@@ -419,8 +395,11 @@ describe('harvest', () => {
     expect(both.log.tabsCreated[0]).toMatchObject({ active: true })
   })
 
-  it('closes the window and keeps no session when injection fails', async () => {
-    const { router, log } = build({ executeScriptError: 'Cannot access contents of the page' })
+  it('closes the window and keeps no session when the bundle cannot be registered', async () => {
+    // Was `executeScript` failing; the bundle is registered rather than injected
+    // now, but the obligation is the same — a capture that cannot put a
+    // viewfinder on the page must not leave a window and a session behind.
+    const { router, log } = build({ registerFails: true })
 
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
@@ -693,69 +672,6 @@ describe('session TTL', () => {
  * nothing. So the popup stays covered until the viewfinder itself takes the
  * cover down.
  */
-describe('the loading scrim', () => {
-  it('covers the retailer document before the viewfinder bundle goes in', async () => {
-    // The popup's own first paint is the loading page, not this — injecting a
-    // cover into our own page would cover a spinner with a spinner. This is the
-    // cover on the retailer's document, on its way to the viewfinder.
-    const { router, log } = build()
-    await startSession(router)
-
-    const bundleAt = injectedBundleAt(log.scripts)
-    expect(bundleAt).toBeGreaterThan(0)
-    expect(scrimInjections(log.scripts.slice(0, bundleAt))).toBeGreaterThanOrEqual(1)
-  })
-
-  it('re-covers the page every time the loading popup reports progress', async () => {
-    // Held mid-load, which is the whole window this is about: the retailer's
-    // document exists and is painting, and the viewfinder is still minutes of
-    // page-load away.
-    const { router, log, updateTab } = build({ tabNeverComplete: true, loadTimeoutMs: 5_000 })
-    void router.handle({ kind: 'harvest', url: PDP })
-    await settleMicrotasks()
-
-    // Nothing yet: the popup is showing our own loading page, which needs no
-    // cover — covering it would be a spinner over a spinner.
-    expect(scrimInjections(log.scripts)).toBe(0)
-
-    updateTab(log.tabIds[0]!, 'loading')
-    await settleMicrotasks()
-
-    expect(scrimInjections(log.scripts)).toBe(1)
-  })
-
-  it('stops re-covering once the viewfinder is up, so it cannot cover that', async () => {
-    const { router, log, updateTab } = build({ autoFrame: false })
-    void router.handle({ kind: 'harvest', url: PDP })
-    await untilFraming(router)
-
-    const before = scrimInjections(log.scripts)
-    updateTab(log.tabIds[0]!, 'loading')
-    await Promise.resolve()
-
-    expect(scrimInjections(log.scripts)).toBe(before)
-  })
-
-  it('leaves the harvest alone when the page cannot be covered', async () => {
-    // A popup with no document yet rejects the injection. That is cosmetic, and
-    // must not cost the user the capture.
-    const { router } = build({ coverInjectFails: true })
-    const reply = await router.handle({ kind: 'harvest', url: PDP })
-
-    expect(reply.ok).toBe(true)
-  })
-})
-
-/**
- * What the popup shows in its first moment.
- *
- * Pointing the window at the retailer means there is no document until that
- * server answers, and nothing can be injected into a tab that has none — so on a
- * slow shop the cover arrived late and the user watched the browser's blank page
- * instead. Opening on a page of our own inverts it: the window paints from disk,
- * and the retailer starts loading behind something rather than in front of
- * nothing.
- */
 describe('opening the popup', () => {
   it('opens the window on our own page, not on the retailer', async () => {
     const { router, log } = build()
@@ -806,23 +722,6 @@ describe('opening the popup', () => {
     expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
   })
 
-  it('does not cover our own page while waiting for it', async () => {
-    // Covering the loading page would be a spinner over a spinner, and the
-    // cover listener must not be live until the retailer's document is what the
-    // tab is showing.
-    const { router, log, updateTab } = build({
-      popupStartsLoading: true,
-      loadingPageTimeoutMs: 5_000,
-    })
-    void router.handle({ kind: 'harvest', url: PDP })
-    await settleMicrotasks()
-
-    updateTab(log.tabIds[0]!, 'loading')
-    await settleMicrotasks()
-
-    expect(scrimInjections(log.scripts)).toBe(0)
-  })
-
   it('opens the fallback tab on our own page too', async () => {
     // Every popup attempt failing drops to a plain tab. It is the same window to
     // the user, so it gets the same first paint.
@@ -833,26 +732,6 @@ describe('opening the popup', () => {
     expect(log.tabsUpdated).toContainEqual({ tabId: log.tabIds[0], opts: { url: PDP } })
   })
 
-  it('does not take our loading page finishing for the retailer finishing', async () => {
-    // The load wait settled on the first `complete` it saw. That is now ours, and
-    // treating it as the retailer's would inject the harvester into the
-    // extension's own spinner and harvest it.
-    const { router, log, navigateTab, updateTab } = build({
-      stallNavigation: true,
-      loadTimeoutMs: 5_000,
-    })
-    void router.handle({ kind: 'harvest', url: PDP })
-    await settleMicrotasks()
-
-    expect(injectedBundleAt(log.scripts)).toBe(-1)
-
-    navigateTab(log.tabIds[0]!, PDP)
-    updateTab(log.tabIds[0]!, 'complete')
-    await settleMicrotasks()
-
-    expect(injectedBundleAt(log.scripts)).toBeGreaterThanOrEqual(0)
-  })
-
   it('gives up the capture when the popup cannot be sent to the retailer', async () => {
     // A popup stuck on our loading page has nothing to harvest. Failing here is
     // what stops it being discovered as an empty harvest of our own spinner.
@@ -860,7 +739,108 @@ describe('opening the popup', () => {
     const reply = await router.handle({ kind: 'harvest', url: PDP })
 
     expect(reply.ok).toBe(false)
-    expect(injectedBundleAt(log.scripts)).toBe(-1)
     expect(log.windowsRemoved.length + log.tabsRemoved.length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * The registration that replaced the injection race.
+ *
+ * The bundle used to be pushed in with `executeScript` after the load wait and
+ * the settle, then armed with a second call. It is registered for the
+ * retailer's origin at `document_start` instead, so the browser runs it before
+ * each document paints — the first one, and every one a redirect or a reload
+ * produces.
+ */
+describe('the document_start registration', () => {
+  it('registers the bundle for the retailer origin before navigating there', async () => {
+    const { router, log } = build()
+    await startSession(router)
+
+    expect(log.registered).toHaveLength(1)
+    expect(log.registered[0]).toMatchObject({
+      js: ['injected.js'],
+      matches: ['https://www2.hm.com/*'],
+      runAt: 'document_start',
+    })
+  })
+
+  it('does not let the registration outlive the browser session', async () => {
+    // `persistAcrossSessions` defaults to TRUE. Left at the default, one capture
+    // would keep running this bundle on that shop, in every tab and every
+    // window, until the browser restarts.
+    const { router, log } = build()
+    await startSession(router)
+
+    expect(log.registered[0]!.persistAcrossSessions).toBe(false)
+  })
+
+  it('registers before the navigation, not after it', async () => {
+    // The other order is the old bug in a new coat: the document would be on
+    // its way before anything was registered to cover it.
+    const { router, log } = build()
+    await startSession(router)
+
+    expect(log.registered).toHaveLength(1)
+    expect(log.tabsUpdated).toHaveLength(1)
+  })
+
+  it('answers the bundle with the session that owns its tab', async () => {
+    const { router, log, armed } = build()
+    const sessionId = await startSession(router)
+
+    // `armed` is filled by the fake going through the real `ready` path.
+    expect(armed).toEqual([sessionId])
+    expect(log.registered[0]!.id).toContain(sessionId)
+  })
+
+  it('tells a tab with no capture to stand down', async () => {
+    // The registration matches an origin, so it also runs in whatever other
+    // tabs the user has open on that shop. They must be told to take their
+    // cover off, not left wearing it.
+    const { router } = build()
+    await startSession(router)
+
+    const reply = await router.handle({ kind: 'ready' }, { tab: { id: 9999 } })
+
+    expect(reply.ok).toBe(false)
+  })
+
+  it('tells a sender with no tab at all to stand down', async () => {
+    const { router } = build()
+    await startSession(router)
+
+    expect((await router.handle({ kind: 'ready' })).ok).toBe(false)
+  })
+
+  it('unregisters when the window closes, not when the harvest returns', async () => {
+    // The window outliving the harvest is the point: on an empty ranking the
+    // studio surfaces it again and the user re-frames, and until it is gone a
+    // navigation still needs to re-arm the viewfinder.
+    const { router, log } = build()
+    const sessionId = await startSession(router)
+
+    expect(log.unregistered).toEqual([])
+
+    await router.handle({ kind: 'resolve', sessionId, action: 'dismiss' })
+
+    expect(log.unregistered).toEqual([`dripd-capture-${sessionId}`])
+  })
+
+  it('unregisters when a capture fails', async () => {
+    const { router, log } = build({ tabsUpdateFails: true })
+    await router.handle({ kind: 'harvest', url: PDP })
+
+    expect(log.unregistered).toHaveLength(1)
+  })
+
+  it('gives up the capture when the bundle cannot be registered', async () => {
+    // Navigating anyway would put the user on a shop page with no cover and no
+    // viewfinder, and nothing on the way to give them one.
+    const { router, log } = build({ registerFails: true })
+    const reply = await router.handle({ kind: 'harvest', url: PDP })
+
+    expect(reply.ok).toBe(false)
+    expect(log.tabsUpdated).toEqual([])
   })
 })

@@ -16,6 +16,7 @@ Everything else here is a consequence of that.
 
 | Verb | Meaning |
 |---|---|
+| `ready` | **Bundle only:** which capture, if any, owns my tab |
 | `harvest(url)` | Opens the popup, **waits for the user to frame a photo**, leaves it open |
 | `fetchBytes(sessionId, url)` | Fetches in that session; **extends its TTL** |
 | `resolve(sessionId, action)` | **Window only:** closes or surfaces it |
@@ -87,61 +88,59 @@ rather than on precise aim.
 ## Nothing of the page before the viewfinder
 
 Between the popup opening and the viewfinder appearing there is a second or two
-of the retailer's own page: the load has to finish, `settleMs` has to pass, and
-only then can the overlay mount. Shown bare, that reads as a window that opened
-and did nothing.
+of the retailer's own page. Shown bare, that reads as a window that opened and
+did nothing.
 
-Covering it takes two halves, because one of them cannot start early enough.
+**The popup opens on `loading.html`, not on the retailer**, and *then something
+waits for it*. `windows.create` resolves when the window exists, not when its tab
+has loaded, so the first version of this navigated on within milliseconds and
+reproduced the original bug exactly. The navigation is gated on our own page
+being on screen, with a short budget, matched by URL prefix — an extension URL's
+origin is the string `"null"`, so an origin comparison there decides nothing.
 
-**The popup opens on `loading.html`, not on the retailer.** Pointing the window
-at the shop means there is no document until that server answers, and nothing
-can be injected into a tab that has none — so the cover arrived exactly as late
-as the retailer was slow, which on a slow retailer is the whole problem. Our own
-page is read from disk and paints as fast as the window appears.
+**The bundle is registered, not injected.** `scripting.registerContentScripts`,
+`run_at: document_start`, the retailer's origin, one registration per capture.
+The browser runs it before each document paints, and `installCover` is the first
+thing it does.
 
-**And then something waits for it.** `windows.create` resolves when the *window*
-exists, not when its tab has loaded, and everything between that and the
-navigation is synchronous — so the first version of this navigated to the
-retailer within milliseconds, left the loading page before it had ever painted,
-and reproduced the original bug exactly. Opening on our own page buys nothing
-unless the navigation is gated on that page being on screen. It is, with a short
-budget (`DEFAULT_LOADING_PAGE_TIMEOUT_MS`), because a page that never reports
-`complete` must not hold a capture hostage.
+That replaced three failed attempts at injecting the cover from the background,
+and the reasons are worth keeping because they all look like our bugs:
 
-That wait matches by URL prefix, not by origin: an extension URL's origin is the
-string `"null"`, so an origin comparison there is true of every non-http page and
-decides nothing.
+- Firefox **blocks** content-script execution in a moz-extension document, so
+  every injection arriving while the tab was still on our loading page failed
+  outright.
+- `tabs.update` does not change a tab's URL synchronously, so those events kept
+  arriving with the old URL current no matter where the listener was armed.
+- The only injection that reliably landed was the one after the load wait and the
+  settle — by which point the shop had been fully visible for the better part of
+  a second, which is the exact thing a cover exists to prevent.
 
-That inversion has a sharp edge: `waitForLoad` used to settle on the first
-`complete` it saw, and with two pages in one tab a `complete` now means either
-"our spinner is up" or "the shop is loaded" — opposite actions. It takes a
-predicate for which page it is waiting on, and the retailer's is an origin check.
-Otherwise the harvester is injected into the extension's own spinner and harvests
-it. A tab that cannot be navigated ends the capture rather than being discovered
-later as an empty harvest of that spinner.
+None of that is a race that can be won by moving a listener. It was moved three
+times.
 
-**`showLoadingScrim` covers the retailer's document**, from the moment it
-replaces the loading page. It is injected on every `tabs.onUpdated` for that tab,
-because a page that renders progressively is visible long before it reports
-`complete`, and once more just before `injected.js` — on the document the
-viewfinder will mount into. Listening stops first, so nothing can put a cover
-back over the viewfinder itself. Nothing covers `loading.html`: it *is* the
-cover.
+**A navigation is no longer a failure.** Every document on the origin runs the
+bundle, including the ones a redirect or a reload produces, so the viewfinder
+re-arms itself instead of being lost. That is what the old inject-once, arm-once
+pair could not do at any timing.
 
-The two halves are drawn to be pixel-identical, so the handover between them is
-invisible. They are also two separate pieces of code with no shared stylesheet —
-the injected half lives on the retailer's page, where the extension's own fonts
-are not reachable without making them web-accessible resources — so improving one
-alone is what makes the seam show. Change both or neither.
+The registration matches an **origin**, so it also runs in whatever other tabs
+the user has open on that shop. The bundle cannot tell from the page which tab it
+is in, so it asks: `ready` is answered from the sender's tab, and a tab with no
+session is told to stand down and takes its own cover off. It is the one message
+whose meaning depends on its sender rather than its contents, because its whole
+question is "which tab am I".
 
-`mountFrameOverlay` takes the cover down, in that same document, in the same turn
-it builds the overlay; a signal from the background context would leave a frame
-in which the page is bare. The id is a literal in `router.ts` because the
-function is serialised into the page and cannot close over an import; `frame.ts`
-exports it as `LOADING_HOST_ID` and the router tests match against that, so the
-two cannot drift. A 20 s self-removal inside the cover is the valve — every path
-that ends a capture closes the window, and if one ever does not, showing the page
-beats trapping the user behind an opaque panel.
+`persistAcrossSessions` is **false** deliberately. The default is true, and a
+registration left behind would keep running on that shop, in every tab and every
+window, until the browser restarts. It is undone in `closeWindow` rather than
+when `harvest` returns, because the window outliving the harvest is the point: on
+an empty ranking the studio surfaces it again and the user re-frames, and until
+the window is gone a navigation still needs to re-arm.
+
+`mountFrameOverlay` takes the cover down, in the same document and the same turn
+it builds the overlay. `cover.ts` owns the id and `frame.ts` imports it — it used
+to be a literal duplicated in `router.ts`, because a function serialised into the
+page cannot close over an import.
 
 ## The extension does not touch a cookie wall
 
@@ -202,13 +201,14 @@ is worthless after a restart.
 | `src/bridge.content.ts` | Content-script wiring |
 | `src/injected/collect.ts` | Read images and metadata off a DOM |
 | `src/injected/frame.ts` | The viewfinder, and what counts as framed |
-| `src/injected/index.ts` | Installs `__dripdHarvest` in the isolated world |
+| `src/injected/index.ts` | Covers the document, asks whose tab it is, arms itself |
+| `src/injected/cover.ts` | The cover, from `document_start` until the viewfinder |
 | `src/loading.html` | The popup's first paint, before the retailer loads |
 | `src/permissions.ts` + `onboarding.*` | The one-time host grant |
 
 ## Tests
 
-101 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
+107 tests, ~1 s, no browser. `npm test` builds first so the bundle test cannot run
 against a stale `dist/`.
 
 - `collect` / `key` / `frame` — pure functions over a happy-dom DOM. The

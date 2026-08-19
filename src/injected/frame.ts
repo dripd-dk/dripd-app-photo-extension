@@ -29,6 +29,7 @@
  */
 
 import { bestFromSrcset } from './collect'
+import { removeCover } from './cover'
 import type { RawHarvest } from '../protocol'
 
 export interface Rect {
@@ -67,17 +68,6 @@ export const HINT_RESERVE = 84
 const HINT_OFFSET = 60
 
 export const HOST_ID = '__dripd_frame'
-
-/**
- * The loading scrim the background context puts over the popup while the page
- * loads.
- *
- * Owned here because this is what takes it down, but the string is duplicated as
- * a literal in `router.ts` — the function that injects it is serialised to the
- * page and cannot close over an import. The router's tests match against this
- * constant, so the two cannot drift apart unnoticed.
- */
-export const LOADING_HOST_ID = '__dripd_loading'
 
 /**
  * Where the viewfinder sits, in viewport coordinates.
@@ -343,9 +333,9 @@ export function mountFrameOverlay(opts: FrameOverlayOpts): FrameOverlay {
 
   doc.getElementById(HOST_ID)?.remove()
   // The viewfinder existing is the one fact that makes the cover unnecessary, so
-  // it comes down here rather than on a signal from the background context: same
+  // it comes down here rather than on a signal from anywhere else: same
   // document, same turn, no frame in which the page is bare.
-  doc.getElementById(LOADING_HOST_ID)?.remove()
+  removeCover(doc)
 
   const host = doc.createElement('div')
   host.id = HOST_ID

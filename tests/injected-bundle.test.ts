@@ -38,6 +38,8 @@ interface Framed {
 }
 
 const sent: Framed[] = []
+/** What the background answers the bundle's `ready` handshake with. */
+let readyReply: unknown = { ok: false, error: 'no_session' }
 
 function loadBundle(): { arm: (id: string) => Promise<void> } {
   const source = readFileSync(BUNDLE, 'utf8')
@@ -58,30 +60,49 @@ function press(which: 'grab' | 'cancel'): void {
   button.click()
 }
 
-describe('dist/injected.js', () => {
-  beforeEach(() => {
-    sent.length = 0
-    ;(globalThis as { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage: (msg: Framed) => {
-          sent.push(msg)
-        },
+function setUpBundleEnv(): void {
+  sent.length = 0
+  readyReply = { ok: false, error: 'no_session' }
+  ;(globalThis as { chrome?: unknown }).chrome = {
+    runtime: {
+      sendMessage: (msg: Framed) => {
+        sent.push(msg)
+        // The bundle asks the background whether its tab is a capture before it
+        // does anything, so this has to answer rather than just record.
+        return msg.kind === 'ready' ? Promise.resolve(readyReply) : undefined
       },
-    }
-    // Anchored top-left, sized from the attributes: enough for the viewfinder
-    // geometry to have a real answer about what overlaps it.
-    Element.prototype.getBoundingClientRect = function (this: Element) {
-      const w = Number(this.getAttribute('width') ?? 0)
-      const h = Number(this.getAttribute('height') ?? 0)
-      return { top: 0, bottom: h, left: 0, right: w, width: w, height: h, x: 0, y: 0 } as DOMRect
-    }
-  })
+    },
+  }
+  // Anchored top-left, sized from the attributes: enough for the viewfinder
+  // geometry to have a real answer about what overlaps it.
+  Element.prototype.getBoundingClientRect = function (this: Element) {
+    const w = Number(this.getAttribute('width') ?? 0)
+    const h = Number(this.getAttribute('height') ?? 0)
+    return { top: 0, bottom: h, left: 0, right: w, width: w, height: h, x: 0, y: 0 } as DOMRect
+  }
+}
 
-  afterEach(() => {
-    Element.prototype.getBoundingClientRect = realRect
-    delete (globalThis as { chrome?: unknown }).chrome
-    document.getElementById('__dripd_frame')?.remove()
-  })
+function tearDownBundleEnv(): void {
+  Element.prototype.getBoundingClientRect = realRect
+  delete (globalThis as { chrome?: unknown }).chrome
+  document.getElementById('__dripd_frame')?.remove()
+  document.getElementById('__dripd_loading')?.remove()
+}
+
+/** What the overlay reported. The handshake shares this channel, and no test
+ *  about harvesting has an opinion about it. */
+function reports(): Framed[] {
+  return sent.filter((m) => m.kind !== 'ready')
+}
+
+/** Let the bundle's own load sequence finish: handshake, DOM ready, arm. */
+function settle(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 0))
+}
+
+describe('dist/injected.js', () => {
+  beforeEach(setUpBundleEnv)
+  afterEach(tearDownBundleEnv)
 
   it('leaves the cookie wall alone, and harvests only when the button is pressed', async () => {
     document.head.innerHTML = `<meta property="og:image" content="${CDN}/a1.jpg?imwidth=657">`
@@ -115,13 +136,13 @@ describe('dist/injected.js', () => {
     expect(document.getElementById('cmp')).not.toBeNull()
     // The whole change in one assertion: armed, mounted, and nothing collected.
     expect(document.getElementById('__dripd_frame')).not.toBeNull()
-    expect(sent).toEqual([])
+    expect(reports()).toEqual([])
 
     press('grab')
 
-    expect(sent).toHaveLength(1)
-    expect(sent[0]).toMatchObject({ kind: 'framed', sessionId: SESSION })
-    const harvest = sent[0]!.harvest!
+    expect(reports()).toHaveLength(1)
+    expect(reports()[0]).toMatchObject({ kind: 'framed', sessionId: SESSION })
+    const harvest = reports()[0]!.harvest!
     expect(harvest.title).toBe('Skjorte - Rød')
 
     // The thumbnail is off to the left of the viewfinder; the photo filling it is
@@ -140,7 +161,9 @@ describe('dist/injected.js', () => {
     await loadBundle().arm(SESSION)
     press('cancel')
 
-    expect(sent).toEqual([{ __dripd: true, kind: 'framed', sessionId: SESSION, cancelled: true }])
+    expect(reports()).toEqual([
+      { __dripd: true, kind: 'framed', sessionId: SESSION, cancelled: true },
+    ])
     expect(document.getElementById('__dripd_frame')).toBeNull()
   }, 20_000)
 
@@ -152,11 +175,73 @@ describe('dist/injected.js', () => {
     await loadBundle().arm(SESSION)
     press('grab')
 
-    const harvest = sent[0]!.harvest!
+    const harvest = reports()[0]!.harvest!
     expect(harvest.images.map((i) => i.url)).toEqual([`${CDN}/tiny.jpg?imwidth=10`])
     // Nothing framed is not nothing harvested — the studio still gets a page to
     // rank, and the picker is what recovers from a badly-aimed grab.
     expect(harvest.meta.framed).toBe(false)
     expect(harvest.meta.framedMatches).toBe(0)
   }, 20_000)
+})
+
+/**
+ * The bundle drives itself now.
+ *
+ * It used to be inert until the background injected it and then armed it with a
+ * session id — two `executeScript` calls, both racing the page's own
+ * navigations, neither of which could run before the retailer had painted. It is
+ * registered at `document_start` instead, so what it does on load is the whole
+ * design: cover the document, ask whose tab this is, and stand down or arm.
+ */
+describe('dist/injected.js, on load', () => {
+  beforeEach(setUpBundleEnv)
+  afterEach(tearDownBundleEnv)
+
+  it('covers the document before anything else', async () => {
+    loadBundle()
+
+    expect(document.getElementById('__dripd_loading')).not.toBeNull()
+  })
+
+  it('asks the background whether this tab is a capture', async () => {
+    loadBundle()
+    await settle()
+
+    expect(sent.map((m) => m.kind)).toContain('ready')
+  })
+
+  it('stands down on a tab that is not a capture, rather than covering it', async () => {
+    // The registration matches the retailer's ORIGIN, so it also runs in any
+    // other tab the user has open on that shop. Those must not be left wearing
+    // a spinner.
+    readyReply = { ok: false, error: 'no_session' }
+
+    loadBundle()
+    await settle()
+
+    expect(document.getElementById('__dripd_loading')).toBeNull()
+    expect(document.getElementById('__dripd_frame')).toBeNull()
+  })
+
+  it('arms itself with the session the background names, and lifts its own cover', async () => {
+    readyReply = { ok: true, sessionId: SESSION }
+
+    loadBundle()
+    await settle()
+
+    expect(document.getElementById('__dripd_frame')).not.toBeNull()
+    expect(document.getElementById('__dripd_loading')).toBeNull()
+  })
+
+  it('reports the framed harvest under that session id, with nobody passing it one', async () => {
+    readyReply = { ok: true, sessionId: SESSION }
+    document.body.innerHTML = `<img src="${CDN}/a1.jpg?imwidth=1260" width="595" height="893">`
+
+    loadBundle()
+    await settle()
+    press('grab')
+
+    const framed = reports()[0]
+    expect(framed?.sessionId).toBe(SESSION)
+  })
 })
